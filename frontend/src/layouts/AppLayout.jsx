@@ -6,6 +6,7 @@ import {
   LogOut, Menu, Phone, ScrollText, Search, Settings, Shuffle, Target, Trophy, UserRound, Users, X,
 } from 'lucide-react';
 import api, { getToken } from '../api/client';
+import { API_URL } from '../api/config';
 import OverduePopup from '../components/OverduePopup';
 import { NAV } from '../constants/nav';
 import { useApp } from '../context/AppContext';
@@ -44,7 +45,7 @@ export default function AppLayout() {
 
   useEffect(() => {
     api.get('/api/v1/notifications?limit=1').then((response) => setUnread(response.data.meta?.unread || 0)).catch(() => {});
-    const socket = io(import.meta.env.VITE_API_URL || undefined, { auth: { token: getToken() } });
+    const socket = io(API_URL || undefined, { auth: { token: getToken() } });
     socket.on('notification', () => setUnread((count) => count + 1));
     return () => socket.disconnect();
   }, [user]);

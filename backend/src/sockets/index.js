@@ -2,10 +2,10 @@ const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
 const { User } = require('../models');
 const { setIo } = require('./io');
+const { corsOrigin } = require('../config/origins');
 
 function initSocket(server) {
-  const origins = (process.env.CLIENT_URL || 'http://localhost:5173').split(',').map((item) => item.trim());
-  const io = new Server(server, { cors: { origin: origins, credentials: true } });
+  const io = new Server(server, { cors: { origin: corsOrigin, credentials: true } });
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token;

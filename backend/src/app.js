@@ -8,6 +8,7 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const swaggerUi = require('swagger-ui-express');
 const { sanitize, errorHandler } = require('./middleware');
+const { corsOrigin } = require('./config/origins');
 const api = require('./routes/api');
 const openapi = require('./docs/openapi');
 
@@ -16,8 +17,7 @@ function createApp() {
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
   app.disable('x-powered-by');
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-  const origins = (process.env.CLIENT_URL || 'http://localhost:5173').split(',').map((item) => item.trim());
-  app.use(cors({ origin: origins, credentials: true }));
+  app.use(cors({ origin: corsOrigin, credentials: true }));
   app.use(compression());
   app.use(express.json({ limit: '1mb' }));
   app.use(cookieParser());

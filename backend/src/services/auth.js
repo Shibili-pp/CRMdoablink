@@ -46,7 +46,7 @@ function cookieOptions() {
   const days = Number(process.env.JWT_REFRESH_DAYS || 7);
   return {
     httpOnly: true,
-    sameSite: 'lax',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
     secure: process.env.NODE_ENV === 'production',
     maxAge: days * 24 * 60 * 60 * 1000,
     path: '/api/v1/auth',
