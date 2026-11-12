@@ -15,7 +15,8 @@ function isAllowedOrigin(origin) {
     return false;
   }
   if (url.protocol === 'http:' && url.hostname === 'localhost') return true;
-  return url.protocol === 'https:' && url.hostname.endsWith('.pages.dev');
+  if (url.protocol !== 'https:') return false;
+  return url.hostname === 'crmorbit.doablink.workers.dev' || url.hostname.endsWith('.pages.dev');
 }
 
 function corsOrigin(origin, callback) {

@@ -12,7 +12,7 @@ const ROLE_ICON = {
   staff: UserRound,
 };
 
-const demoEnabled = import.meta.env.VITE_ENABLE_DEMO_LOGIN === 'true';
+const demoEnabled = !import.meta.env.PROD && import.meta.env.VITE_ENABLE_DEMO_LOGIN === 'true';
 
 export default function LoginPage() {
   const { user, login } = useApp();
