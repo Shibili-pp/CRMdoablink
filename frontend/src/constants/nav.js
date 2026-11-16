@@ -15,7 +15,8 @@ export const NAV = [
   { to: '/notifications', label: 'Notifications', icon: 'alerts', permission: 'notifications.view' },
   { to: '/audit-logs', label: 'Audit Logs', icon: 'audit', permission: 'audit.view' },
   { to: '/branches', label: 'Branch Management', icon: 'branches', any: ['branches.manage', 'teams.manage'] },
-  { to: '/settings', label: 'Settings', icon: 'settings', any: ['settings.manage', 'pipeline.manage'] },
+  { to: '/preset', label: 'Preset', icon: 'preset', permission: 'pipeline.manage' },
+  { to: '/settings', label: 'Settings', icon: 'settings', permission: 'settings.manage' },
 ];
 
 export const DEMOS = [

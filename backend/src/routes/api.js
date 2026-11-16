@@ -20,7 +20,7 @@ const inbox = require('../services/inbox');
 const audit = require('../services/audit');
 const alerts = require('../services/alerts');
 const { PERMISSIONS, ROLE_PERMISSIONS } = require('../config/permissions');
-const { TARGET_TYPES, PRIORITIES, QUALITIES, ROLES } = require('../config/constants');
+const { TARGET_TYPES, PRIORITIES, QUALITIES, ROLES, IMPORT_FIELDS } = require('../config/constants');
 const { AppError } = require('../utils/http');
 
 const router = express.Router();
@@ -62,6 +62,8 @@ router.get('/meta', action(async () => ({
     permissions: PERMISSIONS,
     rolePermissions: ROLE_PERMISSIONS,
     sources: await settings.getLeadSources(),
+    importFields: IMPORT_FIELDS,
+    leadRoles: await settings.getLeadRoles(),
     statuses: await settings.activeStatuses(),
     stages: await settings.activeStages(),
     general: await settings.getGeneral(),
@@ -110,8 +112,10 @@ router.patch('/leads/:id/pipeline', requirePermission('leads.edit'), id, validat
 router.get('/leads/:id/timeline', requirePermission('leads.view'), id, q, action((req) => leads.timeline(req.user, req.params.id, req.query)));
 router.get('/leads/:id/involvement', requirePermission('leads.view'), id, action((req) => leads.involvement(req.user, req.params.id)));
 
-router.get('/lead-imports', requirePermission('leads.import'), q, action((req) => imports.list(req.user, req.query)));
-router.post('/lead-imports', requirePermission('leads.import'), upload.single('file'), action(async (req, meta) => {
+const importGate = requireAny('leads.import', 'leads.assign');
+
+router.get('/lead-imports', importGate, q, action((req) => imports.list(req.user, req.query)));
+router.post('/lead-imports', importGate, upload.single('file'), action(async (req, meta) => {
   if (!req.file || !/\.(xlsx|xls|csv)$/i.test(req.file.originalname)) throw new AppError('Upload an .xlsx, .xls, or .csv file', 400);
   let mapping;
   if (req.body.mapping) {
@@ -119,10 +123,10 @@ router.post('/lead-imports', requirePermission('leads.import'), upload.single('f
   }
   return imports.createPreview(req.user, req.file, mapping, meta);
 }));
-router.get('/lead-imports/:id', requirePermission('leads.import'), id, action((req) => imports.getOne(req.user, req.params.id)));
-router.post('/lead-imports/:id/mapping', requirePermission('leads.import'), id, validate({ body: schemas.mapping }), action((req) => imports.remap(req.user, req.params.id, req.body.mapping)));
-router.post('/lead-imports/:id/commit', requirePermission('leads.import'), id, validate({ body: schemas.commit }), action((req, meta) => imports.commit(req.user, req.params.id, req.body, meta)));
-router.get('/lead-imports/:id/failures', requirePermission('leads.import'), id, action(async (req, meta) => {
+router.get('/lead-imports/:id', importGate, id, action((req) => imports.getOne(req.user, req.params.id)));
+router.post('/lead-imports/:id/mapping', importGate, id, validate({ body: schemas.mapping }), action((req) => imports.remap(req.user, req.params.id, req.body.mapping)));
+router.post('/lead-imports/:id/commit', importGate, id, validate({ body: schemas.commit }), action((req, meta) => imports.commit(req.user, req.params.id, req.body, meta)));
+router.get('/lead-imports/:id/failures', importGate, id, action(async (req, meta) => {
   const rows = await imports.failureRows(req.user, req.params.id);
   return reports.exportLeads(req.user, rows, req.query.format || 'csv', meta);
 }));
@@ -130,6 +134,7 @@ router.get('/lead-imports/:id/failures', requirePermission('leads.import'), id, 
 router.get('/lead-assignments/workload', requirePermission('leads.assign'), action((req) => leads.workload(req.user)));
 router.get('/lead-assignments', requirePermission('leads.assign'), q, action((req) => leads.listAssignments(req.user, req.query)));
 router.post('/lead-assignments', requirePermission('leads.assign'), validate({ body: schemas.assign }), action((req, meta) => leads.assign(req.user, req.body, meta)));
+router.post('/lead-assignments/swap', requirePermission('leads.assign'), validate({ body: schemas.swapSets }), action((req, meta) => leads.swapSets(req.user, req.body, meta)));
 router.post('/lead-assignments/distribute', requirePermission('leads.assign'), validate({ body: schemas.distribute }), action((req, meta) => leads.distribute(req.user, req.body, meta)));
 
 router.get('/lead-swaps', requirePermission('leads.swap'), q, action((req) => leads.listSwaps(req.user, req.query)));
@@ -138,7 +143,7 @@ router.post('/lead-swaps/:id/approve', requirePermission('leads.assign'), id, va
 router.post('/lead-swaps/:id/reject', requirePermission('leads.assign'), id, validate({ body: schemas.swapReview }), action((req, meta) => leads.reviewSwap(req.user, req.params.id, { ...req.body, status: 'rejected' }, meta)));
 
 router.get('/followups/popups', requirePermission('followups.view'), action((req) => followups.popups(req.user)));
-router.get('/followups/summary', requirePermission('followups.view'), action((req) => followups.summary(req.user)));
+router.get('/followups/summary', requirePermission('followups.view'), q, action((req) => followups.summary(req.user, req.query)));
 router.get('/followups/calendar', requirePermission('followups.view'), q, action((req) => followups.calendar(req.user, req.query)));
 router.get('/followups', requirePermission('followups.view'), q, action((req) => followups.list(req.user, req.query)));
 router.post('/followups', requirePermission('followups.manage'), validate({ body: schemas.followUp }), action((req, meta) => followups.create(req.user, req.body, meta)));
@@ -201,8 +206,16 @@ router.patch('/alert-rules/:id', requirePermission('settings.manage'), id, valid
 
 router.get('/settings', requireAny('settings.manage', 'pipeline.manage'), action(() => settings.listSettings()));
 router.put('/settings/:key', requirePermission('settings.manage'), validate({ params: schemas.keyParam, body: schemas.setting }), action((req, meta) => settings.updateSetting(req.user, req.params.key, req.body.value, meta)));
+router.get('/lead-sources', requirePermission('pipeline.manage'), action(async () => ({ data: await settings.getLeadSources() })));
+router.post('/lead-sources', requirePermission('pipeline.manage'), validate({ body: schemas.leadRoleBody }), action((req, meta) => settings.addLeadSource(req.user, req.body, meta)));
+router.delete('/lead-sources/:name', requirePermission('pipeline.manage'), validate({ params: schemas.leadSourceParam }), action((req, meta) => settings.removeLeadSource(req.user, req.params.name, meta)));
+router.get('/lead-roles', requirePermission('pipeline.manage'), action(async () => ({ data: await settings.getLeadRoles() })));
+router.post('/lead-roles', requirePermission('pipeline.manage'), validate({ body: schemas.leadRoleBody }), action((req, meta) => settings.addLeadRole(req.user, req.body, meta)));
+router.delete('/lead-roles/:key', requirePermission('pipeline.manage'), validate({ params: schemas.leadRoleParam }), action((req, meta) => settings.removeLeadRole(req.user, req.params.key, meta)));
+router.get('/lead-statuses', requirePermission('pipeline.manage'), action(() => settings.listStatuses()));
 router.post('/lead-statuses', requirePermission('pipeline.manage'), validate({ body: schemas.statusBody }), action((req, meta) => settings.saveStatus(req.user, req.body, meta)));
 router.patch('/lead-statuses/:id', requirePermission('pipeline.manage'), id, validate({ body: schemas.statusBody }), action((req, meta) => settings.saveStatus(req.user, req.body, meta, req.params.id)));
+router.delete('/lead-statuses/:id', requirePermission('pipeline.manage'), id, action((req, meta) => settings.removeStatus(req.user, req.params.id, meta)));
 router.post('/pipeline-stages', requirePermission('pipeline.manage'), validate({ body: schemas.stageBody }), action((req, meta) => settings.saveStage(req.user, req.body, meta)));
 router.patch('/pipeline-stages/:id', requirePermission('pipeline.manage'), id, validate({ body: schemas.stageBody }), action((req, meta) => settings.saveStage(req.user, req.body, meta, req.params.id)));
 

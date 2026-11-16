@@ -77,6 +77,7 @@ const leadSchema = new Schema({
   state: String,
   country: { type: String, default: 'India' },
   source: { type: String, index: true },
+  leadRole: { type: String, default: '', index: true },
   category: String,
   priority: { type: String, enum: ['low', 'medium', 'high', 'urgent'], default: 'medium', index: true },
   quality: { type: String, enum: ['cold', 'warm', 'hot', ''], default: '' },

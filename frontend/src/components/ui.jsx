@@ -117,21 +117,22 @@ export function SearchableSelect({ label, value, onChange, options, placeholder 
   );
 }
 
-export function DataTable({ columns, rows, loading, empty, onRow, page, pages, onPage }) {
+export function DataTable({ columns, rows, loading, empty, onRow, page, pages, onPage, className = '' }) {
   if (loading) return <SkeletonRows />;
   if (!rows?.length) return <Empty title={empty || 'Nothing here yet'} message="Try another filter or add a record." />;
+  const cellClass = (column) => [column.hide ? 'col-hide' : '', column.hideOnMobile ? 'mobile-hide' : '', column.cellClass || ''].filter(Boolean).join(' ');
   return (
-    <div className="card">
+    <div className={`card ${className}`.trim()}>
       <div className="table-wrap">
         <table>
           <thead>
-            <tr>{columns.map((column) => <th key={column.key} className={column.hide ? 'col-hide' : ''}>{column.label}</th>)}</tr>
+            <tr>{columns.map((column) => <th key={column.key} className={cellClass(column)}>{column.label}</th>)}</tr>
           </thead>
           <tbody>
             {rows.map((row) => (
               <tr key={row.id || row._id} className={onRow ? 'clickable' : ''} onClick={() => onRow && onRow(row)}>
                 {columns.map((column) => (
-                  <td key={column.key} data-label={column.label} className={column.hide ? 'col-hide' : ''}>
+                  <td key={column.key} data-label={column.label} className={cellClass(column)}>
                     <span className="cell-value">{column.render ? column.render(row) : row[column.key]}</span>
                   </td>
                 ))}

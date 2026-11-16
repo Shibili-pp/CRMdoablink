@@ -66,6 +66,7 @@ const STAFF = [
 const TEAM_LEADER = [
   ...STAFF,
   'leads.assign',
+  'leads.import',
   'leads.export',
   'staff.view',
   'reports.view',

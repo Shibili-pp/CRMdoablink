@@ -8,7 +8,17 @@ const ROLE_RANK = {
   STAFF: 1,
 };
 
+const LEAD_ROLES = [
+  { key: 'student', label: 'Student' },
+  { key: 'education_consultant', label: 'Education consultant' },
+];
+
 const LEAD_SOURCES = [
+  'Meta',
+  'Scrapped lead',
+];
+
+const ORIGINAL_LEAD_SOURCES = [
   'Meta Ads',
   'Google Ads',
   'Website',
@@ -109,7 +119,6 @@ const IMPORT_FIELDS = [
   { key: 'city', label: 'City' },
   { key: 'state', label: 'State' },
   { key: 'country', label: 'Country' },
-  { key: 'source', label: 'Source' },
   { key: 'category', label: 'Category' },
   { key: 'priority', label: 'Priority' },
   { key: 'quality', label: 'Quality' },
@@ -128,7 +137,6 @@ const HEADER_ALIASES = {
   city: ['city', 'town'],
   state: ['state', 'province'],
   country: ['country'],
-  source: ['source', 'lead source'],
   category: ['category', 'lead category'],
   priority: ['priority'],
   quality: ['quality', 'lead quality'],
@@ -149,7 +157,9 @@ const COMPANY = {
 module.exports = {
   ROLES,
   ROLE_RANK,
+  LEAD_ROLES,
   LEAD_SOURCES,
+  ORIGINAL_LEAD_SOURCES,
   LEAD_STATUSES,
   PIPELINE_STAGES,
   PRIORITIES,

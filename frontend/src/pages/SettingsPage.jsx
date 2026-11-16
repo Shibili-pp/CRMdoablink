@@ -42,10 +42,6 @@ export default function SettingsPage() {
         </div>
         <button className="btn" type="button" style={{ marginTop: 10 }} onClick={saveWeights}>Save weights</button>
       </article>}
-      {can('pipeline.manage') && <article className="card" style={{ marginBottom: 14 }}>
-        <h3>Lead statuses</h3>
-        {settings.statuses.map((status) => <p key={status.key}>{status.label} · {status.category}</p>)}
-      </article>}
       {can('settings.manage') && <article className="card">
         <h3>Alert thresholds</h3>
         {settings.alertRules.map((rule) => (

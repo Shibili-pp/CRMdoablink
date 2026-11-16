@@ -3,7 +3,7 @@ const {
 } = require('../models');
 const { recordAudit } = require('./audit');
 const {
-  LEAD_SOURCES, LEAD_STATUSES, PIPELINE_STAGES, ALERT_RULES, LEADERBOARD_WEIGHTS, COMPANY,
+  LEAD_ROLES, LEAD_SOURCES, ORIGINAL_LEAD_SOURCES, LEAD_STATUSES, PIPELINE_STAGES, ALERT_RULES, LEADERBOARD_WEIGHTS, COMPANY,
 } = require('../config/constants');
 const { ALL_PERMISSIONS, ROLE_PERMISSIONS } = require('../config/permissions');
 const { AppError } = require('../utils/http');
@@ -28,9 +28,83 @@ function clearSettingsCache() {
   generalCache = { at: 0, value: null };
 }
 
+async function getLeadRoles() {
+  const doc = await SystemSetting.findOne({ key: 'leadRoles' }).lean();
+  return Array.isArray(doc?.value) && doc.value.length ? doc.value : LEAD_ROLES.map((role) => ({ ...role }));
+}
+
+async function assertLeadRole(key) {
+  const roles = await getLeadRoles();
+  const match = roles.find((role) => role.key === key);
+  if (!match) throw new AppError('Choose a lead role', 422);
+  return match;
+}
+
+function roleKey(label) {
+  return String(label || '').trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+}
+
+async function addLeadRole(user, body, meta) {
+  const label = String(body.label || '').trim();
+  const key = roleKey(label);
+  if (!key) throw new AppError('Use letters or numbers in the role name', 422);
+  const roles = await getLeadRoles();
+  if (roles.some((role) => role.key === key)) throw new AppError('That role already exists', 409);
+  const next = [...roles, { key, label }];
+  await SystemSetting.updateOne({ key: 'leadRoles' }, { key: 'leadRoles', value: next }, { upsert: true });
+  await recordAudit({
+    user: user._id, username: user.username, action: 'leadRole.create', module: 'settings', newValues: { key, label }, ...meta,
+  });
+  return { data: next, message: 'Role added' };
+}
+
+async function removeLeadRole(user, key, meta) {
+  const roles = await getLeadRoles();
+  if (roles.length <= 1) throw new AppError('Keep at least one role', 422);
+  const next = roles.filter((role) => role.key !== key);
+  if (next.length === roles.length) throw new AppError('Role not found', 404);
+  await SystemSetting.updateOne({ key: 'leadRoles' }, { value: next });
+  await recordAudit({
+    user: user._id, username: user.username, action: 'leadRole.delete', module: 'settings', oldValues: { key }, ...meta,
+  });
+  return { data: next, message: 'Role removed' };
+}
+
 async function getLeadSources() {
   const doc = await SystemSetting.findOne({ key: 'leadSources' }).lean();
   return Array.isArray(doc?.value) && doc.value.length ? doc.value : [...LEAD_SOURCES];
+}
+
+async function assertLeadSource(name) {
+  const sources = await getLeadSources();
+  const match = sources.find((source) => source.toLowerCase() === String(name || '').trim().toLowerCase());
+  if (!match) throw new AppError('Choose a lead source', 422);
+  return match;
+}
+
+async function addLeadSource(user, body, meta) {
+  const label = String(body.label || '').trim();
+  if (label.length < 2) throw new AppError('Use at least 2 characters in the source name', 422);
+  const sources = await getLeadSources();
+  if (sources.some((source) => source.toLowerCase() === label.toLowerCase())) throw new AppError('That source already exists', 409);
+  const next = [...sources, label];
+  await SystemSetting.updateOne({ key: 'leadSources' }, { key: 'leadSources', value: next }, { upsert: true });
+  await recordAudit({
+    user: user._id, username: user.username, action: 'leadSource.create', module: 'settings', newValues: { label }, ...meta,
+  });
+  return { data: next, message: 'Source added' };
+}
+
+async function removeLeadSource(user, name, meta) {
+  const sources = await getLeadSources();
+  if (sources.length <= 1) throw new AppError('Keep at least one source', 422);
+  const next = sources.filter((source) => source.toLowerCase() !== String(name || '').trim().toLowerCase());
+  if (next.length === sources.length) throw new AppError('Source not found', 404);
+  await SystemSetting.updateOne({ key: 'leadSources' }, { value: next });
+  await recordAudit({
+    user: user._id, username: user.username, action: 'leadSource.delete', module: 'settings', oldValues: { name }, ...meta,
+  });
+  return { data: next, message: 'Source removed' };
 }
 
 async function getWeights() {
@@ -161,8 +235,20 @@ async function ensureReferenceData() {
       },
     });
   }
-  if (!await SystemSetting.findOne({ key: 'leadSources' })) {
+  if (!await SystemSetting.findOne({ key: 'leadRoles' })) {
+    await SystemSetting.create({ key: 'leadRoles', value: LEAD_ROLES });
+  }
+  const storedSources = await SystemSetting.findOne({ key: 'leadSources' });
+  if (!storedSources) {
     await SystemSetting.create({ key: 'leadSources', value: LEAD_SOURCES });
+  } else if (Array.isArray(storedSources.value)) {
+    const sameAsOriginal = storedSources.value.length === ORIGINAL_LEAD_SOURCES.length
+      && ORIGINAL_LEAD_SOURCES.every((source) => storedSources.value.includes(source));
+    if (sameAsOriginal) {
+      storedSources.value = LEAD_SOURCES;
+      storedSources.markModified('value');
+      await storedSources.save();
+    }
   }
   if (!await SystemSetting.findOne({ key: 'leaderboardWeights' })) {
     await SystemSetting.create({ key: 'leaderboardWeights', value: LEADERBOARD_WEIGHTS });
@@ -196,6 +282,23 @@ async function activeStatuses() {
 async function activeStages() {
   const rows = await PipelineStage.find({ isActive: true }).sort({ sortOrder: 1 }).lean();
   return rows.length ? rows : PIPELINE_STAGES;
+}
+
+async function listStatuses() {
+  return { data: await activeStatuses() };
+}
+
+async function removeStatus(user, id, meta) {
+  const doc = await CustomLeadStatus.findById(id);
+  if (!doc || !doc.isActive) throw new AppError('Status not found', 404);
+  const activeCount = await CustomLeadStatus.countDocuments({ isActive: true });
+  if (activeCount <= 1) throw new AppError('Keep at least one status', 422);
+  doc.isActive = false;
+  await doc.save();
+  await recordAudit({
+    user: user._id, username: user.username, action: 'status.delete', module: 'settings', recordId: doc.id, oldValues: { key: doc.key, label: doc.label }, ...meta,
+  });
+  return { data: { id: doc.id, key: doc.key }, message: 'Status removed' };
 }
 
 async function saveStatus(user, body, meta, id) {
@@ -256,7 +359,14 @@ async function updateAlertRule(user, id, body, meta) {
 module.exports = {
   getGeneral,
   clearSettingsCache,
+  getLeadRoles,
+  assertLeadRole,
+  addLeadRole,
+  removeLeadRole,
   getLeadSources,
+  assertLeadSource,
+  addLeadSource,
+  removeLeadSource,
   getWeights,
   roleTemplate,
   permissionsFor,

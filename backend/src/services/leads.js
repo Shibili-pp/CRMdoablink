@@ -1,12 +1,12 @@
 const {
-  Lead, LeadAssignment, LeadActivity, LeadSwapRequest, User, Team, Counter, Payment,
+  Lead, LeadAssignment, LeadActivity, LeadSwapRequest, User, Team, Counter, Payment, FollowUp, RevenueOpportunity,
 } = require('../models');
 const { AppError, paging, metaFor, escapeRegex, sortFrom, clean } = require('../utils/http');
 const { normalizePhone, isValidPhone, formatPhone } = require('../utils/phone');
 const { recordAudit, changed } = require('./audit');
 const { notify, notifyMany } = require('./notify');
 const { addActivity, statusLabel } = require('./activity');
-const { getGeneral, getLeadSources, activeStatuses } = require('./settings');
+const { getGeneral, getLeadSources, assertLeadRole, activeStatuses } = require('./settings');
 const {
   leadScope, bucketScope, staffScope, combine, isElevated, hasPermission,
 } = require('./access');
@@ -15,7 +15,7 @@ const { LOST_STATUSES } = require('../config/constants');
 const { dateKeyOf, dayBounds } = require('../utils/time');
 
 const LEAD_SORT = ['createdAt', 'name', 'expectedRevenue', 'status', 'priority', 'followUpAt', 'leadCode', 'lastContactedAt', 'assignmentDate'];
-const STAFF_FIELDS = ['status', 'nextActionTitle', 'nextActionDueAt', 'notes', 'lostReason', 'tags', 'followUpAt', 'priority', 'quality'];
+const STAFF_FIELDS = ['status', 'nextActionTitle', 'nextActionDueAt', 'notes', 'lostReason', 'tags', 'followUpAt', 'priority', 'quality', 'leadRole'];
 
 async function nextLeadCode() {
   await Counter.updateOne({ _id: 'lead' }, { $setOnInsert: { seq: 10000 } }, { upsert: true });
@@ -54,6 +54,7 @@ async function buildLeadFilter(user, query, { bucket = false } = {}) {
     if (clean(query[key])) filter[key] = query[key];
   });
   if (clean(query.staff)) filter.assignedTo = query.staff;
+  if (clean(query.leadRole)) filter.leadRole = query.leadRole;
   if (clean(query.team)) filter.team = query.team;
   if (clean(query.branch) && isElevated(user)) filter.branch = query.branch;
   if (query.bucket === 'unassigned') filter.assignedTo = null;
@@ -142,7 +143,10 @@ async function create(user, body, meta) {
   const general = await getGeneral();
   const sources = await getLeadSources();
   if (!sources.includes(body.source)) throw new AppError('Choose a configured lead source', 422);
-  await assertStatus(body.status || 'fresh');
+  const statuses = await activeStatuses();
+  const status = body.status || (statuses.some((item) => item.key === 'fresh') ? 'fresh' : statuses[0]?.key);
+  await assertStatus(status);
+  const leadRole = await assertLeadRole(body.leadRole);
   const phones = await preparePhones(body, general.countryCode);
   let assignedTo = body.assignedTo || null;
   let team = body.team || null;
@@ -180,6 +184,7 @@ async function create(user, body, meta) {
     state: body.state || '',
     country: body.country || 'India',
     source: body.source,
+    leadRole: leadRole.key,
     category: body.category || '',
     priority: body.priority || 'medium',
     quality: body.quality || '',
@@ -188,7 +193,7 @@ async function create(user, body, meta) {
     branch,
     createdBy: user._id,
     assignmentDate: assignedTo ? new Date() : null,
-    status: body.status || 'fresh',
+    status,
     statusChangedAt: new Date(),
     nextActionTitle: body.nextActionTitle || '',
     nextActionDueAt: body.nextActionDueAt || null,
@@ -244,6 +249,7 @@ async function update(user, id, body, meta) {
     if (patch.phone) patch.phoneNormalized = phones.phoneNormalized;
     if (patch.alternatePhone !== undefined) patch.alternatePhoneNormalized = phones.alternatePhoneNormalized;
   }
+  if (patch.leadRole) await assertLeadRole(patch.leadRole);
   if (patch.source) {
     const sources = await getLeadSources();
     if (!sources.includes(patch.source)) throw new AppError('Choose a configured lead source', 422);
@@ -418,6 +424,7 @@ async function rowsForExport(user, query) {
     Phone: formatPhone(lead.phoneNormalized),
     Source: lead.source,
     Status: lead.status,
+    Role: lead.leadRole || '',
     'Assigned staff': lead.assignedTo?.name || '',
     'Expected revenue': lead.expectedRevenue || 0,
     'Next follow-up': lead.followUpAt ? new Date(lead.followUpAt).toISOString() : '',
@@ -476,11 +483,23 @@ async function assignOne(user, { leadId, toStaff, reason, mode, expectedStaffId,
     reason: reason || '',
     mode: mode || 'manual',
   }], session ? { session } : undefined);
+  if (staff) {
+    const moved = { assignedTo: staff._id, team: staff.team || null, branch: staff.branch || updated.branch };
+    await FollowUp.updateMany(
+      { lead: updated._id, status: { $in: ['pending', 'missed'] } },
+      { $set: { assignedTo: staff._id, team: moved.team, branch: moved.branch } },
+    );
+    await RevenueOpportunity.updateMany(
+      { lead: updated._id, deletedAt: null, status: 'open' },
+      { $set: { staff: staff._id, team: moved.team, branch: moved.branch } },
+    );
+  }
+  const movedWord = mode === 'swap' ? 'Swapped to' : (lead.assignedTo ? 'Reassigned to' : 'Assigned to');
   await addActivity({
     lead: updated,
     type: staff ? 'lead_assigned' : 'lead_reassigned',
     actor: user,
-    description: staff ? `Assigned to ${staff.name}` : 'Returned to the lead bucket',
+    description: staff ? `${movedWord} ${staff.name}. Open follow-ups moved with this lead.` : 'Returned to the lead bucket',
     oldValue: lead.assignedTo, newValue: staff ? staff._id : null, metadata: { reason, mode }, session,
   });
   if (staff) {
@@ -510,6 +529,34 @@ async function assign(user, body, meta) {
     newValues: { leadIds: body.leadIds, staffId: body.staffId || null, assigned }, ...meta,
   });
   return { data: { assigned, conflicts: results.filter((row) => row.conflict), results }, message: 'Assignment completed' };
+}
+
+async function swapSets(user, body, meta) {
+  if (String(body.staffA) === String(body.staffB)) throw new AppError('Choose two different staff members', 422);
+  const idsA = [...new Set((body.leadIdsA || []).map(String))];
+  const idsB = [...new Set((body.leadIdsB || []).map(String))].filter((id) => !idsA.includes(id));
+  if (!idsA.length && !idsB.length) throw new AppError('Select at least one lead', 422);
+  const moved = [];
+  for (const leadId of idsA) {
+    moved.push(await assignOne(user, {
+      leadId, toStaff: body.staffB, reason: 'Swap', mode: 'swap', expectedStaffId: body.staffA,
+    }));
+  }
+  for (const leadId of idsB) {
+    moved.push(await assignOne(user, {
+      leadId, toStaff: body.staffA, reason: 'Swap', mode: 'swap', expectedStaffId: body.staffB,
+    }));
+  }
+  const assigned = moved.filter((row) => row.ok).length;
+  await recordAudit({
+    user: user._id, username: user.username, action: 'lead.swap.direct', module: 'leads',
+    newValues: { staffA: body.staffA, staffB: body.staffB, fromA: idsA.length, fromB: idsB.length, assigned }, ...meta,
+  });
+  const bothSides = idsA.length > 0 && idsB.length > 0;
+  return {
+    data: { assigned, conflicts: moved.filter((row) => !row.ok) },
+    message: bothSides ? 'Leads swapped' : 'Leads reassigned',
+  };
 }
 
 async function workload(user) {
@@ -729,6 +776,7 @@ async function updatePipeline(user, id, body, meta) {
 
 async function pipelineReport(user, query) {
   const filter = { deletedAt: null, inPipeline: true };
+  if (query.leadRole) filter.leadRole = query.leadRole;
   let selected = null;
   if (user.role === 'STAFF') {
     filter.assignedTo = user._id;
@@ -779,6 +827,7 @@ module.exports = {
   rowsForExport,
   listAssignments,
   assign,
+  swapSets,
   workload,
   distribute,
   listSwaps,

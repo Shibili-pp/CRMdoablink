@@ -18,6 +18,7 @@ import PipelinePage from './pages/PipelinePage';
 import LoginPage from './pages/LoginPage';
 import NotificationsPage from './pages/NotificationsPage';
 import PerformancePage from './pages/PerformancePage';
+import PresetPage from './pages/PresetPage';
 import ReportsPage from './pages/ReportsPage';
 import SettingsPage from './pages/SettingsPage';
 import StaffPage from './pages/StaffPage';
@@ -65,6 +66,7 @@ export default function App() {
         <Route path="/notifications" element={<Permit permission="notifications.view"><NotificationsPage /></Permit>} />
         <Route path="/audit-logs" element={<Permit permission="audit.view"><AuditPage /></Permit>} />
         <Route path="/branches" element={<Permit any={['branches.manage', 'teams.manage']}><BranchesPage /></Permit>} />
+        <Route path="/preset" element={<Permit permission="pipeline.manage"><PresetPage /></Permit>} />
         <Route path="/settings" element={<Permit any={['settings.manage', 'pipeline.manage']}><SettingsPage /></Permit>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

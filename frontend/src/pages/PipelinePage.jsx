@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
+import { Phone } from 'lucide-react';
 import api from '../api/client';
 import { Empty, LEAD_STATUS_COLORS, Page, SkeletonRows } from '../components/ui';
 import { messageFrom, useApp } from '../context/AppContext';
@@ -10,7 +11,7 @@ function localPhone(row) {
   return row.phoneDisplay || digits || '—';
 }
 
-function PipelineRow({ row, statuses, toast, onSaved }) {
+function PipelineRow({ row, statuses, leadRoles, toast, onSaved }) {
   const [form, setForm] = useState({
     consultancyName: row.consultancyName || '',
     proposedPlan: row.proposedPlan ?? '',
@@ -47,20 +48,22 @@ function PipelineRow({ row, statuses, toast, onSaved }) {
   };
 
   const color = LEAD_STATUS_COLORS[form.status] || { bg: '#fff', fg: '#334155' };
+  const keep = (event) => event.stopPropagation();
 
   return (
-    <tr>
-      <td data-label="SL NO"><span className="cell-value">{row.sl}</span></td>
-      <td data-label="NAME"><span className="cell-value"><Link to={`/leads/${row._id}`}>{row.name}</Link></span></td>
-      <td data-label="PHONE NUMBER"><span className="cell-value">{localPhone(row)}</span></td>
-      <td data-label="CONSULTANCY NAME">
+    <tr className="clickable" onClick={() => navigate(`/leads/${row._id}`)}>
+      <td className="pipeline-hide" data-label="SL NO"><span className="cell-value">{row.sl}</span></td>
+      <td data-label="Name"><span className="cell-value">{row.name}</span></td>
+      <td data-label="Role"><span className="cell-value">{leadRoles.find((role) => role.key === row.leadRole)?.label || '—'}</span></td>
+      <td className="pipeline-hide" data-label="PHONE NUMBER"><span className="cell-value">{localPhone(row)}</span></td>
+      <td className="pipeline-hide" data-label="CONSULTANCY NAME">
         <span className="cell-value">
-          <input aria-label={`Consultancy for ${row.name}`} value={form.consultancyName} onChange={(event) => setForm({ ...form, consultancyName: event.target.value })} onBlur={(event) => { if (event.target.value !== (row.consultancyName || '')) save({ consultancyName: event.target.value }); }} />
+          <input aria-label={`Consultancy for ${row.name}`} value={form.consultancyName} onClick={keep} onChange={(event) => setForm({ ...form, consultancyName: event.target.value })} onBlur={(event) => { if (event.target.value !== (row.consultancyName || '')) save({ consultancyName: event.target.value }); }} />
         </span>
       </td>
-      <td data-label="STATUS">
+      <td data-label="Status">
         <span className="cell-value">
-          <select aria-label={`Status for ${row.name}`} value={form.status} style={{ background: color.bg, color: color.fg }} onChange={(event) => changeStatus(event.target.value)}>
+          <select aria-label={`Status for ${row.name}`} value={form.status} style={{ background: color.bg, color: color.fg }} onClick={keep} onChange={(event) => changeStatus(event.target.value)}>
             {statuses.map((status) => {
               const tone = LEAD_STATUS_COLORS[status.key] || { bg: '#fff', fg: '#334155' };
               return <option key={status.key} value={status.key} style={{ background: tone.bg, color: tone.fg }}>{status.label}</option>;
@@ -68,14 +71,19 @@ function PipelineRow({ row, statuses, toast, onSaved }) {
           </select>
         </span>
       </td>
-      <td data-label="PROPOSED PLAN">
+      <td className="pipeline-hide" data-label="PROPOSED PLAN">
         <span className="cell-value">
-          <input aria-label={`Proposed plan for ${row.name}`} type="number" min="0" value={form.proposedPlan} onChange={(event) => setForm({ ...form, proposedPlan: event.target.value })} onBlur={(event) => { if (String(event.target.value) !== String(row.proposedPlan ?? '')) save({ proposedPlan: Number(event.target.value) || 0 }); }} />
+          <input aria-label={`Proposed plan for ${row.name}`} type="number" min="0" value={form.proposedPlan} onClick={keep} onChange={(event) => setForm({ ...form, proposedPlan: event.target.value })} onBlur={(event) => { if (String(event.target.value) !== String(row.proposedPlan ?? '')) save({ proposedPlan: Number(event.target.value) || 0 }); }} />
         </span>
       </td>
-      <td data-label="REMARKS">
+      <td className="pipeline-hide" data-label="REMARKS">
         <span className="cell-value">
-          <textarea className="pipeline-remark" aria-label={`Remarks for ${row.name}`} value={form.remarks} onChange={(event) => setForm({ ...form, remarks: event.target.value })} onBlur={(event) => { if (event.target.value !== (row.remarks || '')) save({ remarks: event.target.value }); }} />
+          <textarea className="pipeline-remark" aria-label={`Remarks for ${row.name}`} value={form.remarks} onClick={keep} onChange={(event) => setForm({ ...form, remarks: event.target.value })} onBlur={(event) => { if (event.target.value !== (row.remarks || '')) save({ remarks: event.target.value }); }} />
+        </span>
+      </td>
+      <td data-label="Call" className="lead-call">
+        <span className="cell-value">
+          {row.phoneNormalized ? <a className="btn call-btn" href={`tel:+${row.phoneNormalized}`} aria-label={`Call ${row.name}`} onClick={keep}><Phone size={16} /> Call</a> : '—'}
         </span>
       </td>
     </tr>
@@ -87,13 +95,16 @@ export default function PipelinePage() {
   const [reports, setReports] = useState([]);
   const [people, setPeople] = useState([]);
   const [statuses, setStatuses] = useState([]);
+  const [leadRoles, setLeadRoles] = useState([]);
   const [staff, setStaff] = useState('');
+  const [roleFilter, setRoleFilter] = useState('');
   const [loading, setLoading] = useState(true);
 
-  const load = (staffId = staff, quiet = false) => {
+  const load = (staffId = staff, role = roleFilter, quiet = false) => {
     if (!quiet) setLoading(true);
     const params = new URLSearchParams();
     if (staffId) params.set('staff', staffId);
+    if (role) params.set('leadRole', role);
     Promise.all([
       api.get(`/api/v1/pipeline?${params}`),
       api.get('/api/v1/meta'),
@@ -101,24 +112,31 @@ export default function PipelinePage() {
       setReports(reportRes.data.data || []);
       setPeople(reportRes.data.meta?.staff || []);
       setStatuses(metaRes.data.data.statuses || []);
+      setLeadRoles(metaRes.data.data.leadRoles || []);
     }).catch((error) => toast(messageFrom(error), 'error')).finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(staff); }, [staff]);
+  useEffect(() => { load(staff, roleFilter); }, [staff, roleFilter]);
 
   return (
     <Page title="Pipeline" subtitle="Leads marked for the pipeline, grouped by the staff member who owns them.">
-      {people.length > 0 && (
-        <div className="filters" role="group" aria-label="Pipeline view">
-          <button className={`btn ${staff ? 'secondary' : ''}`} type="button" onClick={() => setStaff('')}>All</button>
+      <div className="filters" role="group" aria-label="Pipeline view">
+        {people.length > 0 && <button className={`btn ${staff ? 'secondary' : ''}`} type="button" onClick={() => setStaff('')}>All</button>}
+        <label className="field"><span>Role</span>
+          <select aria-label="Role" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}>
+            <option value="">All roles</option>
+            {leadRoles.map((role) => <option key={role.key} value={role.key}>{role.label}</option>)}
+          </select>
+        </label>
+        {people.length > 0 && (
           <label className="field"><span>Staff</span>
             <select aria-label="Staff view" value={staff} onChange={(event) => setStaff(event.target.value)}>
               <option value="">All staff</option>
               {people.map((person) => <option key={person._id} value={person._id}>{person.name}</option>)}
             </select>
           </label>
-        </div>
-      )}
+        )}
+      </div>
       {loading && <SkeletonRows />}
       {!loading && !reports.length && <Empty title="No pipeline leads yet" message="Open a lead and choose Add to pipeline. It will show here in that staff member's report." />}
       {!loading && reports.map((report) => (
@@ -132,16 +150,18 @@ export default function PipelinePage() {
                   <tr>
                     <th>SL NO</th>
                     <th>NAME</th>
+                    <th>ROLE</th>
                     <th>PHONE NUMBER</th>
                     <th>CONSULTANCY NAME</th>
                     <th>STATUS</th>
                     <th>PROPOSED PLAN</th>
                     <th>REMARKS</th>
+                    <th>CALL</th>
                   </tr>
                 </thead>
                 <tbody>
                   {report.rows.map((row) => (
-                    <PipelineRow key={row._id} row={row} statuses={statuses} toast={toast} onSaved={() => load(staff, true)} />
+                    <PipelineRow key={row._id} row={row} statuses={statuses} leadRoles={leadRoles} toast={toast} onSaved={() => load(staff, roleFilter, true)} />
                   ))}
                 </tbody>
               </table>

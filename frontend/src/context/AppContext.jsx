@@ -67,7 +67,7 @@ export function AppProvider({ children }) {
             <h2>{confirmState.title || 'Please confirm'}</h2>
             <p className="muted" style={{ margin: '8px 0 16px' }}>{confirmState.message}</p>
             <div className="actions">
-              <button className="btn secondary" type="button" onClick={() => { confirmState.resolve(false); setConfirmState(null); }}>Cancel</button>
+              <button className="btn secondary" type="button" onClick={() => { confirmState.resolve(false); setConfirmState(null); }}>{confirmState.cancelLabel || 'Cancel'}</button>
               <button className={`btn ${confirmState.danger ? 'danger' : ''}`} type="button" onClick={() => { confirmState.resolve(true); setConfirmState(null); }}>{confirmState.confirmLabel || 'Confirm'}</button>
             </div>
           </div>

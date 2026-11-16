@@ -84,7 +84,7 @@ describe('DoablinkOrbit acceptance', () => {
     const committed = await request(app)
       .post(`/api/v1/lead-imports/${preview.body.data._id}/commit`)
       .set('Authorization', `Bearer ${admin.accessToken}`)
-      .send({ skipDuplicates: true, updateExisting: false });
+      .send({ skipDuplicates: true, updateExisting: false, leadRole: 'student', source: 'Meta' });
     expect(committed.status).toBe(200);
     expect(committed.body.data.summary.imported).toBe(1);
     const bucket = await request(app).get('/api/v1/leads?view=bucket&q=Import One').set('Authorization', `Bearer ${admin.accessToken}`);

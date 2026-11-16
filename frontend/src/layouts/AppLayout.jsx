@@ -3,7 +3,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import {
   Bell, Building2, CalendarClock, Clock3, FileBarChart, Inbox, Kanban, KeyRound, LayoutDashboard,
-  LogOut, Menu, Phone, ScrollText, Search, Settings, Shuffle, Target, Trophy, UserRound, Users, X,
+  ListChecks, LogOut, Menu, Phone, ScrollText, Search, Settings, Shuffle, Target, Trophy, UserRound, Users, X,
 } from 'lucide-react';
 import api, { getToken } from '../api/client';
 import { API_URL } from '../api/config';
@@ -28,6 +28,7 @@ const ICONS = {
   alerts: Bell,
   audit: ScrollText,
   branches: Building2,
+  preset: ListChecks,
   settings: Settings,
 };
 

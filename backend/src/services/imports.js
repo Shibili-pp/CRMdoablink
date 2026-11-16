@@ -3,7 +3,7 @@ const { LeadImport, Lead } = require('../models');
 const { AppError, paging, metaFor } = require('../utils/http');
 const { normalizePhone, isValidPhone } = require('../utils/phone');
 const { HEADER_ALIASES, IMPORT_FIELDS, PRIORITIES, QUALITIES } = require('../config/constants');
-const { getGeneral, getLeadSources } = require('./settings');
+const { getGeneral, getLeadSources, assertLeadRole, assertLeadSource } = require('./settings');
 const { nextLeadCode, presentLead } = require('./leads');
 const { addActivity } = require('./activity');
 const { recordAudit } = require('./audit');
@@ -63,7 +63,6 @@ async function validateRows(rawRows, mapping, countryCode, sources) {
     if (!row.mapped.phone) errors.push('Phone is required');
     else if (!isValidPhone(phoneNormalized)) errors.push('Phone number is invalid');
     if (row.mapped.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.mapped.email)) errors.push('Email is invalid');
-    if (row.mapped.source && !sources.includes(row.mapped.source)) errors.push('Source is not configured');
     if (row.mapped.priority && !PRIORITIES.includes(row.mapped.priority.toLowerCase())) errors.push('Priority is invalid');
     if (row.mapped.quality && !QUALITIES.includes(row.mapped.quality.toLowerCase())) errors.push('Quality is invalid');
     let duplicateInFile = false;
@@ -136,12 +135,35 @@ function summarize(rows, extra = {}) {
   };
 }
 
+function columnLetter(index) {
+  let n = index + 1;
+  let letters = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    letters = String.fromCharCode(65 + rem) + letters;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letters;
+}
+
+function columnsFor(value) {
+  const headers = value.detectedColumns || [];
+  const sample = value.rows?.[0]?.raw || {};
+  return headers.map((header, index) => ({
+    letter: columnLetter(index),
+    number: index + 1,
+    header,
+    sample: sample[header] || '',
+  }));
+}
+
 function publicImport(doc, includeRows) {
   const value = doc.toObject ? doc.toObject() : doc;
+  const columns = columnsFor(value);
   if (!includeRows) {
-    return { ...value, rows: undefined, rowCount: (value.rows || []).length };
+    return { ...value, columns, rows: undefined, rowCount: (value.rows || []).length };
   }
-  return value;
+  return { ...value, columns };
 }
 
 async function list(user, query) {
@@ -192,6 +214,8 @@ async function commit(user, id, body, meta) {
   const selected = new Set((body.rowNumbers || []).map(Number));
   const general = await getGeneral();
   const sources = await getLeadSources();
+  const leadRole = await assertLeadRole(body.leadRole);
+  const source = await assertLeadSource(body.source);
   let imported = 0;
   let updated = 0;
   let skipped = 0;
@@ -233,7 +257,8 @@ async function commit(user, id, body, meta) {
           phone: row.mapped.phone,
           phoneNormalized,
           ...fieldsFromMapped(row.mapped, sources),
-          source: sources.includes(row.mapped.source) ? row.mapped.source : 'Manual Upload',
+          source,
+          leadRole: leadRole.key,
           branch,
           createdBy: user._id,
           assignedTo: null,

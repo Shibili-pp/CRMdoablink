@@ -11,6 +11,12 @@ function scopeFor(user) {
   return recordScope(user, { staff: 'assignedTo' });
 }
 
+function assignedFilter(user, query = {}) {
+  const filter = { ...scopeFor(user) };
+  if (query.staff && user.role !== 'STAFF') filter.assignedTo = query.staff;
+  return filter;
+}
+
 async function dueFrom(body) {
   if (body.dueAt) return new Date(body.dueAt);
   const general = await getGeneral();
@@ -24,6 +30,10 @@ async function list(user, query) {
   const now = new Date();
   if (query.status) filter.status = query.status;
   if (query.staff && user.role !== 'STAFF') filter.assignedTo = query.staff;
+  if (query.leadRole) {
+    const leadIds = await Lead.find({ deletedAt: null, leadRole: query.leadRole }).distinct('_id');
+    filter.lead = { $in: leadIds };
+  }
   if (query.priority) filter.priority = query.priority;
   if (query.bucket === 'today') {
     const general = await getGeneral();
@@ -49,11 +59,19 @@ async function list(user, query) {
   if (!query.order) sort.dueAt = 1;
   const [rows, total] = await Promise.all([
     FollowUp.find(filter).sort(sort).skip(skip).limit(limit)
-      .populate('assignedTo', 'name')
-      .populate('lead', 'leadCode name status')
+      .populate('lead', 'leadCode name status phoneNormalized leadRole')
       .lean(),
     FollowUp.countDocuments(filter),
   ]);
+  return {
+    data: rows.map((row) => ({
+      ...row,
+      phoneNormalized: row.lead?.phoneNormalized || '',
+      leadRole: row.lead?.leadRole || '',
+      overdue: row.status === 'pending' && new Date(row.dueAt) < now,
+    })),
+    meta: metaFor(page, limit, total),
+  };
   return { data: rows.map((row) => ({ ...row, overdue: row.status === 'pending' && new Date(row.dueAt) < now })), meta: metaFor(page, limit, total) };
 }
 
