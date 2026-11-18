@@ -1,6 +1,7 @@
 package com.doablink.orbit.api
 
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -28,7 +29,7 @@ class OrbitApi(private val baseUrl: String) {
             .put("manufacturer", android.os.Build.MANUFACTURER)
             .put("model", android.os.Build.MODEL)
             .put("osVersion", android.os.Build.VERSION.RELEASE)
-            .put("appVersion", "0.1.0")
+            .put("appVersion", "0.2.0")
             .put("consentAccepted", true)
             .put("contactsConsent", contactsGranted)
             .put("callLogPermission", if (callLogGranted) "granted" else "denied")
@@ -58,6 +59,56 @@ class OrbitApi(private val baseUrl: String) {
             for (index in start until end) batch.put(contacts.get(index))
             post("/android/contacts/sync", JSONObject().put("contacts", batch), deviceToken)
             start = end
+        }
+    }
+
+    fun nextDial(deviceToken: String): JSONObject? {
+        val response = get("/android/dial/next", deviceToken)
+        if (!response.has("data") || response.isNull("data")) return null
+        return response.getJSONObject("data")
+    }
+
+    fun finishDial(deviceToken: String, id: String, status: String, reason: String) {
+        post("/android/dial/$id/result", JSONObject().put("status", status).put("reason", reason), deviceToken)
+    }
+
+    fun uploadRecording(deviceToken: String, fileName: String, mime: String, bytes: ByteArray, phone: String, androidEventId: String) {
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("consentAccepted", "true")
+            .addFormDataPart("phone", phone)
+            .addFormDataPart("androidEventId", androidEventId)
+            .addFormDataPart("recordingId", fileName)
+            .addFormDataPart("file", fileName, bytes.toRequestBody(mime.toMediaType()))
+            .build()
+        val request = Request.Builder()
+            .url(baseUrl.trimEnd('/') + "/android/recordings/upload")
+            .header("Authorization", "Bearer $deviceToken")
+            .post(body)
+            .build()
+        client.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val message = runCatching { JSONObject(text).optString("message") }.getOrNull().orEmpty()
+                error(message.ifBlank { "Recording upload failed" })
+            }
+        }
+    }
+
+    private fun get(path: String, token: String): JSONObject {
+        val request = Request.Builder()
+            .url(baseUrl.trimEnd('/') + path)
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
+        client.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val message = runCatching { JSONObject(text).optString("message") }.getOrNull().orEmpty()
+                error(message.ifBlank { "Orbit API ${response.code}" })
+            }
+            if (text.isBlank()) return JSONObject()
+            return JSONObject(text)
         }
     }
 

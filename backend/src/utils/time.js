@@ -136,6 +136,20 @@ function viewRange(query = {}, timeZone) {
     const range = periodRange('month', timeZone);
     return { ...range, preset, label: 'This month', from: dateKeyFromDate(range.start, timeZone), to: dateKeyFromDate(new Date(range.end.getTime() - 1), timeZone) };
   }
+  if (preset === 'last7' || preset === 'last30') {
+    const parts = zonedParts(new Date(), timeZone);
+    const startParts = addCalendarDays(parts.year, parts.month, parts.day, preset === 'last7' ? -6 : -29);
+    const from = `${startParts.year}-${String(startParts.month).padStart(2, '0')}-${String(startParts.day).padStart(2, '0')}`;
+    const to = dateKeyFromDate(new Date(), timeZone);
+    return {
+      start: dayBounds(from, timeZone).start,
+      end: dayBounds(to, timeZone).end,
+      preset,
+      label: preset === 'last7' ? 'Last 7 days' : 'Last 30 days',
+      from,
+      to,
+    };
+  }
   if (preset === 'yesterday') {
     const parts = zonedParts(new Date(), timeZone);
     const previous = addCalendarDays(parts.year, parts.month, parts.day, -1);

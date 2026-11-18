@@ -15,6 +15,11 @@ export default function LeadDetailPage() {
   const [statuses, setStatuses] = useState([]);
   const [leadRoles, setLeadRoles] = useState([]);
   const [note, setNote] = useState('');
+  const [calls, setCalls] = useState([]);
+  const [callSheet, setCallSheet] = useState(null);
+  const [callResult, setCallResult] = useState({ status: 'connected', minutes: 1 });
+  const [recordingFile, setRecordingFile] = useState(null);
+  const [recordingConsent, setRecordingConsent] = useState(false);
   const [nextAction, setNextAction] = useState({ title: '', date: '', time: '' });
 
   const load = () => {
@@ -23,12 +28,14 @@ export default function LeadDetailPage() {
       api.get(`/api/v1/leads/${id}/timeline?limit=50`),
       api.get(`/api/v1/leads/${id}/involvement`),
       api.get('/api/v1/meta'),
-    ]).then(([leadRes, timeRes, peopleRes, metaRes]) => {
+      api.get(`/api/v1/calls?leadId=${id}&limit=20`),
+    ]).then(([leadRes, timeRes, peopleRes, metaRes, callRes]) => {
       setLead(leadRes.data.data);
       setTimeline(timeRes.data.data);
       setPeople(peopleRes.data.data);
       setStatuses(metaRes.data.data.statuses);
       setLeadRoles(metaRes.data.data.leadRoles || []);
+      setCalls(callRes.data.data || []);
       setNextAction({ title: leadRes.data.data.nextActionTitle || '', date: '', time: '' });
     }).catch((error) => toast(messageFrom(error), 'error'));
   };
@@ -98,6 +105,52 @@ export default function LeadDetailPage() {
     } catch (error) { toast(messageFrom(error), 'error'); }
   };
 
+  const startPhoneCall = () => {
+    setCallSheet({ startedAt: new Date().toISOString(), savedId: '' });
+  };
+
+  const savePhoneCall = async () => {
+    try {
+      const response = await api.post('/api/v1/calls/manual', {
+        phone: lead.phone || lead.phoneNormalized,
+        contactName: lead.name,
+        callType: callResult.status === 'missed' ? 'missed' : 'outgoing',
+        status: callResult.status,
+        startedAt: callSheet.startedAt,
+        durationSeconds: Math.round(Number(callResult.minutes || 0) * 60),
+        leadId: lead.id || lead._id,
+        provider: 'web',
+        notes: 'Logged from the phone website. The SIM call log was not read.',
+      });
+      setCallSheet({ ...callSheet, savedId: response.data.data.id || response.data.data._id });
+      toast('Call result saved');
+      load();
+    } catch (error) { toast(messageFrom(error), 'error'); }
+  };
+
+  const uploadRecording = async () => {
+    if (!recordingConsent) {
+      toast('Confirm that this recording may be stored', 'error');
+      return;
+    }
+    if (!recordingFile) {
+      toast('Choose the recording file saved on this phone', 'error');
+      return;
+    }
+    const body = new FormData();
+    body.append('file', recordingFile);
+    body.append('consentAccepted', 'true');
+    body.append('phone', lead.phoneNormalized || '');
+    body.append('leadId', lead.id || lead._id || '');
+    if (callSheet?.savedId) body.append('callId', callSheet.savedId);
+    try {
+      const response = await api.post('/api/v1/call-recordings/upload', body);
+      toast(response.data.message);
+      setRecordingFile(null);
+      setRecordingConsent(false);
+    } catch (error) { toast(messageFrom(error), 'error'); }
+  };
+
   const statusLabel = statuses.find((item) => item.key === lead.status)?.label;
   const owners = people?.previousOwners || [];
 
@@ -109,10 +162,35 @@ export default function LeadDetailPage() {
           <span className="muted">{[lead.source, lead.district].filter(Boolean).join(' · ') || 'No source'}</span>
         </div>
         <p className="lead-phone">{lead.phoneDisplay || 'No phone'}</p>
+        <p className="muted">On the phone, use the browser menu and choose Install app or Add to Home screen. Installing this website does not give Android call-log permission.</p>
         {lead.phoneNormalized && (
           <div className="lead-contact-actions">
-            <a className="btn" href={`tel:+${lead.phoneNormalized}`}><Phone size={16} /> Call</a>
+            <a className="btn" href={`tel:+${lead.phoneNormalized}`} onClick={startPhoneCall}><Phone size={16} /> Call</a>
             <a className="btn secondary" href={`https://wa.me/${lead.phoneNormalized}`} target="_blank" rel="noreferrer"><MessageCircle size={16} /> WhatsApp</a>
+          </div>
+        )}
+        {callSheet && can('calls.manual') && (
+          <div className="phone-log">
+            <p>The phone dialer is open. This website cannot read Android’s call log, even after you install it. When you come back, save the result.</p>
+            <label className="field"><span>Result</span>
+              <select aria-label="Call result" value={callResult.status} onChange={(event) => setCallResult({ ...callResult, status: event.target.value })}>
+                <option value="connected">Connected</option>
+                <option value="no_answer">No answer</option>
+                <option value="missed">Missed</option>
+                <option value="rejected">Rejected</option>
+                <option value="busy">Busy</option>
+              </select>
+            </label>
+            <label className="field"><span>Minutes</span>
+              <input type="number" min="0" aria-label="Call minutes" value={callResult.minutes} onChange={(event) => setCallResult({ ...callResult, minutes: event.target.value })} />
+            </label>
+            {!callSheet.savedId && <button className="btn" type="button" onClick={savePhoneCall}>Save call result</button>}
+            <label className="check-row">
+              <input type="checkbox" checked={recordingConsent} onChange={(event) => setRecordingConsent(event.target.checked)} />
+              <span>I am uploading a recording this phone already saved, and the other person was told the call may be recorded.</span>
+            </label>
+            <input aria-label="Recording file" type="file" accept="audio/*,.mp3,.m4a,.wav,.ogg,.amr,.3gp" onChange={(event) => setRecordingFile(event.target.files?.[0] || null)} />
+            <button className="btn secondary" type="button" onClick={uploadRecording}>Upload recording</button>
           </div>
         )}
         {can('leads.edit') && (
@@ -167,6 +245,18 @@ export default function LeadDetailPage() {
           </form>
         </article>
       )}
+
+      <article className="card lead-block">
+        <h3>Calls</h3>
+        {calls.map((call) => (
+          <article key={call._id}>
+            <strong>{call.callType} · {call.status}</strong>
+            <div className="muted">{call.staff?.name || 'Employee'} · {new Date(call.startedAt).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} · {Math.round((call.durationSeconds || 0) / 60)} min · {call.dataSource}</div>
+            {call.notes && <p>{call.notes}</p>}
+          </article>
+        ))}
+        {!calls.length && <p className="muted">No stored calls match this lead’s phone yet. A shared number is left unmatched until someone chooses the lead.</p>}
+      </article>
 
       <article className="card lead-block">
         <h3>History</h3>

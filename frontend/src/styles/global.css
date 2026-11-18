@@ -187,6 +187,8 @@ tr.clickable:hover td { background: #fafbfd; }
 .lead-filters { align-items: end; }
 .lead-filters-more { display: contents; }
 .filters-toggle { display: none; }
+.phone-log { display: grid; gap: 10px; margin: 0 0 14px; padding: 12px; border: 1px solid #d9e1ea; border-radius: 12px; background: #fff; }
+.check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; }
 .lead-contact-actions { display: flex; gap: 8px; margin: 0 0 14px; }
 .lead-contact-actions .btn { flex: 1 1 140px; }
 .lead-sheet-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

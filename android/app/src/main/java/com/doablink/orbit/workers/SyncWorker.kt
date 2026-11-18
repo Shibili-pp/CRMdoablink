@@ -9,6 +9,8 @@ import androidx.work.WorkerParameters
 import com.doablink.orbit.api.OrbitApi
 import com.doablink.orbit.calllogs.CallLogReader
 import com.doablink.orbit.contacts.ContactReader
+import com.doablink.orbit.dial.DialAlerts
+import com.doablink.orbit.recordings.RecordingFolder
 import org.json.JSONArray
 
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
@@ -19,12 +21,33 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         val api = OrbitApi(base)
         return try {
             var calls = 0
+            var events = JSONArray()
             if (ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
                 val since = prefs.getLong("lastCallSync", System.currentTimeMillis() - 7L * 86_400_000L)
-                val events = usable(CallLogReader.readSince(applicationContext, since))
+                events = usable(CallLogReader.readSince(applicationContext, since))
                 calls = events.length()
                 api.syncCalls(deviceToken, events)
                 if (calls > 0) prefs.edit().putLong("lastCallSync", System.currentTimeMillis()).apply()
+            }
+            var recordings = 0
+            val tree = prefs.getString("recordingTree", null)
+            if (prefs.getBoolean("recordingUpload", false) && !tree.isNullOrBlank()) {
+                val sinceRecording = prefs.getLong("lastRecordingSync", System.currentTimeMillis() - 7L * 86_400_000L)
+                val files = RecordingFolder.pending(applicationContext, tree, sinceRecording, events)
+                files.forEach { file ->
+                    api.uploadRecording(deviceToken, file.name, file.mime, file.bytes, file.phone, file.androidEventId)
+                    recordings += 1
+                }
+                if (recordings > 0) prefs.edit().putLong("lastRecordingSync", System.currentTimeMillis()).apply()
+            }
+            val dial = api.nextDial(deviceToken)
+            if (dial != null) {
+                prefs.edit()
+                    .putString("pendingDialId", dial.optString("id"))
+                    .putString("pendingDialPhone", dial.optString("phone"))
+                    .putString("pendingDialName", dial.optString("contactName"))
+                    .apply()
+                DialAlerts.show(applicationContext, dial.optString("id"), dial.optString("contactName"), dial.optString("phone"))
             }
             var contacts = 0
             val contactsAllowed = prefs.getBoolean("contactsSync", false)
@@ -33,7 +56,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
                 contacts = rows.length()
                 api.syncContacts(deviceToken, rows)
             }
-            remember("Sent $calls calls and $contacts contacts")
+            remember("Sent $calls calls, $recordings recordings and $contacts contacts")
             Result.success()
         } catch (error: Exception) {
             remember(error.message ?: "Sync failed")

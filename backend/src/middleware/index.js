@@ -115,7 +115,7 @@ function errorHandler(err, req, res, next) {
   if (res.headersSent) return next(err);
   const multer = require('multer');
   if (err instanceof multer.MulterError) {
-    const message = err.code === 'LIMIT_FILE_SIZE' ? 'File exceeds the 5 MB limit' : err.message;
+    const message = err.code === 'LIMIT_FILE_SIZE' ? 'File is larger than the allowed size' : err.message;
     return res.status(400).json({ success: false, message, data: null });
   }
   if (err && err.code === 11000) {

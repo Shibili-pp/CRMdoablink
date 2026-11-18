@@ -1,5 +1,7 @@
+const ExcelJS = require('exceljs');
+const mongoose = require('mongoose');
 const {
-  AndroidDevice, CallLog, CallRecording, SyncedContact, SyncBatch, Lead, User,
+  AndroidDevice, CallLog, CallRecording, DialRequest, SyncedContact, SyncBatch, Lead, User, FollowUp,
 } = require('../models');
 const { AppError, paging, metaFor, escapeRegex, sortFrom } = require('../utils/http');
 const { normalizePhone, isValidPhone, formatPhone } = require('../utils/phone');
@@ -12,6 +14,8 @@ const { getGeneral } = require('./settings');
 const { viewRange } = require('../utils/time');
 const { recordScope, combine, isElevated, hasPermission } = require('./access');
 const { nextLeadCode } = require('./leads');
+const recordingStore = require('./recordingStore');
+const { COMPANY } = require('../config/constants');
 
 function presentCall(call) {
   return {
@@ -164,6 +168,10 @@ async function recordCall({ staff, device, payload, dataSource, actor }) {
       durationSeconds: Math.max(0, Number(payload.durationSeconds) || 0),
       status: payload.status || (payload.callType === 'missed' ? 'missed' : 'unknown'),
       dataSource,
+      contactName: payload.contactName || '',
+      notes: payload.notes || '',
+      provider: payload.provider || payload.recordingProvider || '',
+      providerCallId: payload.providerCallId || payload.androidEventId || '',
       recordingId: payload.recordingId || '',
       syncedAt: dataSource === 'android_sync' ? new Date() : undefined,
       enteredBy: actor?._id,
@@ -195,6 +203,18 @@ async function recordCall({ staff, device, payload, dataSource, actor }) {
         });
       }
     }
+    if (dataSource === 'android_sync') {
+      await DialRequest.findOneAndUpdate(
+        {
+          staff: staff._id,
+          phoneNormalized,
+          status: { $in: ['pending', 'dialing'] },
+          createdAt: { $gte: new Date(Date.now() - 3 * 60 * 60 * 1000) },
+        },
+        { status: 'completed', completedAt: new Date(), androidEventId: payload.androidEventId || '' },
+        { sort: { createdAt: 1 } }
+      );
+    }
     let recording = null;
     if (payload.recordingId) {
       recording = await saveRecording({
@@ -215,7 +235,7 @@ async function recordCall({ staff, device, payload, dataSource, actor }) {
   }
 }
 
-async function saveRecording({ recordingId, provider, call, staff, device, accessReference, status, dataSource }) {
+async function saveRecording({ recordingId, provider, call, lead, staff, device, accessReference, storageKey, mimeType, byteSize, status, dataSource }) {
   const recordingKey = `${provider}:${recordingId}`;
   const existing = await CallRecording.findOne({ recordingKey });
   if (existing) return existing;
@@ -224,11 +244,14 @@ async function saveRecording({ recordingId, provider, call, staff, device, acces
     recordingId,
     provider,
     callLog: call?._id,
-    lead: call?.lead,
+    lead: lead || call?.lead,
     staff: staff._id,
     device: device?._id,
     status: status || 'pending',
     accessReference,
+    storageKey: storageKey || '',
+    mimeType: mimeType || '',
+    byteSize: byteSize || 0,
     durationSeconds: call?.durationSeconds,
     dataSource,
     isDemo: dataSource === 'demo_seed',
@@ -238,7 +261,9 @@ async function saveRecording({ recordingId, provider, call, staff, device, acces
       lead: call.lead,
       type: 'call_recording',
       actor: staff,
-      description: `Recording reference ${recordingId} stored. The audio file is not stored in the CRM.`,
+      description: storageKey
+        ? `Recording ${recordingId} uploaded from the phone. Playback stays inside the CRM.`
+        : `Recording reference ${recordingId} stored. The audio file was not uploaded.`,
       metadata: { recordingId, provider, dataSource },
     });
   }
@@ -261,7 +286,7 @@ async function syncCalls(device, staff, body) {
     const result = await recordCall({
       staff,
       device,
-      payload: { ...event, leadId: undefined },
+      payload: { ...event, provider: event.provider || 'sim', providerCallId: event.providerCallId || event.androidEventId, leadId: undefined },
       dataSource: 'android_sync',
       actor: staff,
     });
@@ -374,6 +399,153 @@ async function syncRecording(device, staff, body) {
   return { data: { id: recording.id, recordingId: recording.recordingId, status: recording.status }, message: 'Recording reference stored' };
 }
 
+async function uploadRecording(device, staff, file, body) {
+  if (String(body.consentAccepted) !== 'true') {
+    throw new AppError('Recording upload requires the employee to confirm consent on the phone', 422);
+  }
+  if (!file?.buffer?.length) throw new AppError('Choose an audio file the phone already saved', 422);
+  if (!String(file.mimetype || '').startsWith('audio/')) throw new AppError('Only an audio recording can be uploaded', 422);
+  const storageKey = recordingStore.saveLocal(file.buffer, file.mimetype);
+  const recordingId = body.recordingId || storageKey.slice(6);
+  let call = null;
+  if (body.androidEventId) call = await CallLog.findOne({ device: device._id, androidEventId: String(body.androidEventId) });
+  if (!call && body.phone) {
+    const phoneNormalized = normalizePhone(body.phone);
+    if (isValidPhone(phoneNormalized)) {
+      call = await CallLog.findOne({
+        device: device._id,
+        phoneNormalized,
+        startedAt: { $gte: new Date(Date.now() - 6 * 60 * 60 * 1000) },
+      }).sort({ startedAt: -1 });
+    }
+  }
+  const recording = await saveRecording({
+    recordingId,
+    provider: 'sim',
+    call,
+    staff,
+    device,
+    accessReference: '',
+    storageKey,
+    mimeType: file.mimetype,
+    byteSize: file.size,
+    status: 'available',
+    dataSource: 'android_sync',
+  });
+  if (call && !call.recordingId) {
+    call.recordingId = recording.recordingId;
+    await call.save();
+  }
+  await recordAudit({
+    user: staff._id, username: staff.username, action: 'recording.upload', module: 'recordings', recordId: recording.id,
+    newValues: { recordingId: recording.recordingId, linked: Boolean(call), bytes: file.size },
+  });
+  return {
+    data: { id: recording.id, linked: Boolean(call) },
+    message: call ? 'Recording stored and linked to the matching call' : 'Recording stored. No single recent call matched, so it was not attached to a lead.',
+  };
+}
+
+function audioFile(file) {
+  const name = String(file?.originalname || '').toLowerCase();
+  const type = String(file?.mimetype || '');
+  return type.startsWith('audio/') || type === 'video/mp4' || /\.(mp3|m4a|aac|wav|ogg|amr|3gp|mp4)$/.test(name);
+}
+
+async function uploadStaffRecording(user, file, body, meta) {
+  if (String(body.consentAccepted) !== 'true') {
+    throw new AppError('Confirm that this recording may be stored before uploading it', 422);
+  }
+  if (!file?.buffer?.length) throw new AppError('Choose the recording file saved on this phone', 422);
+  if (!audioFile(file)) throw new AppError('Choose an audio recording file', 422);
+  let call = null;
+  if (body.callId && mongoose.isValidObjectId(body.callId)) {
+    call = await CallLog.findOne({ _id: body.callId, ...recordScope(user, { staff: 'staff' }) });
+  }
+  let leadId = call?.lead || null;
+  if (!leadId && body.leadId && mongoose.isValidObjectId(body.leadId)) {
+    const lead = await Lead.findOne({ _id: body.leadId, deletedAt: null, ...recordScope(user) });
+    if (lead) leadId = lead._id;
+  }
+  const storageKey = recordingStore.saveLocal(file.buffer, file.mimetype || 'audio/mp4');
+  const recording = await saveRecording({
+    recordingId: storageKey.slice(6),
+    provider: 'web',
+    call,
+    lead: leadId,
+    staff: user,
+    accessReference: '',
+    storageKey,
+    mimeType: file.mimetype || 'audio/mp4',
+    byteSize: file.size,
+    status: 'available',
+    dataSource: 'manual',
+  });
+  if (call && !call.recordingId) {
+    call.recordingId = recording.recordingId;
+    await call.save();
+  }
+  await recordAudit({
+    user: user._id, username: user.username, action: 'recording.upload', module: 'recordings', recordId: recording.id,
+    newValues: { recordingId: recording.recordingId, linked: Boolean(call || leadId), bytes: file.size, source: 'web' },
+    ...meta,
+  });
+  return {
+    data: { id: recording.id, linked: Boolean(call || leadId) },
+    message: 'Recording stored. It plays inside the CRM through a short private link.',
+  };
+}
+
+async function queueDial(user, body) {
+  const general = await getGeneral();
+  const phoneNormalized = normalizePhone(body.phone, general.countryCode);
+  if (!isValidPhone(phoneNormalized)) throw new AppError('Enter a valid phone number', 422);
+  let staff = user;
+  if (body.staffId && String(body.staffId) !== String(user._id)) {
+    if (user.role === 'STAFF') throw new AppError('You can only queue a call on your own phone', 403);
+    staff = await User.findOne({ _id: body.staffId, deletedAt: null, isActive: true, ...recordScope(user, { staff: '_id' }) });
+    if (!staff) throw new AppError('Employee not found', 404);
+  }
+  const device = await AndroidDevice.findOne({ staff: staff._id, status: 'active' });
+  if (!device) throw new AppError('This employee has not connected the Android app. The website cannot place the SIM call.', 422);
+  const dial = await DialRequest.create({
+    staff: staff._id,
+    requestedBy: user._id,
+    lead: body.leadId || undefined,
+    phone: body.phone,
+    phoneNormalized,
+    contactName: body.contactName || '',
+    provider: 'sim',
+  });
+  return { data: { id: dial.id, status: dial.status, provider: 'sim' }, message: 'Queued on the employee phone. They confirm the call, and it uses their SIM.', status: 201 };
+}
+
+async function claimDial(device, staff) {
+  let dial = await DialRequest.findOne({ staff: staff._id, device: device._id, status: 'dialing' }).sort({ createdAt: 1 });
+  if (!dial) {
+    dial = await DialRequest.findOneAndUpdate(
+      { staff: staff._id, status: 'pending' },
+      { status: 'dialing', device: device._id, claimedAt: new Date() },
+      { sort: { createdAt: 1 }, new: true }
+    );
+  }
+  if (!dial) return { data: null, message: 'No call is waiting' };
+  return {
+    data: { id: dial.id, phone: dial.phoneNormalized, contactName: dial.contactName, leadId: dial.lead || null },
+    message: 'Call is waiting for confirmation on the phone',
+  };
+}
+
+async function finishDial(device, staff, id, body) {
+  const dial = await DialRequest.findOne({ _id: id, staff: staff._id, device: device._id, status: 'dialing' });
+  if (!dial) throw new AppError('This call request is no longer waiting', 404);
+  dial.status = body.status;
+  dial.failureReason = body.reason || '';
+  dial.completedAt = new Date();
+  await dial.save();
+  return { data: { id: dial.id, status: dial.status }, message: 'Call request updated' };
+}
+
 async function createManual(user, body, meta) {
   const staff = body.staffId && hasPermission(user, 'calls.view') && user.role !== 'STAFF'
     ? await User.findById(body.staffId)
@@ -401,9 +573,9 @@ function callFilter(user, query) {
   if (query.status) filter.status = query.status;
   if (query.dataSource) filter.dataSource = query.dataSource;
   if (query.matchStatus) filter.matchStatus = query.matchStatus;
-  if (query.leadId) filter.lead = query.leadId;
+  if (query.leadId && mongoose.isValidObjectId(query.leadId)) filter.lead = new mongoose.Types.ObjectId(query.leadId);
   if (query.phone) filter.phoneNormalized = normalizePhone(query.phone);
-  if (query.staff && user.role !== 'STAFF') filter.staff = query.staff;
+  if (query.staff && user.role !== 'STAFF' && mongoose.isValidObjectId(query.staff)) filter.staff = new mongoose.Types.ObjectId(query.staff);
   if (query.team && isElevated(user)) filter.team = query.team;
   if (query.branch && isElevated(user)) filter.branch = query.branch;
   if (query.from || query.to || query.dateFrom || query.dateTo) {
@@ -415,8 +587,10 @@ function callFilter(user, query) {
   }
   if (query.q) {
     const digits = String(query.q).replace(/\D/g, '');
+    const name = escapeRegex(String(query.q).trim());
     filter.$or = [
       { phoneNormalized: { $regex: escapeRegex(digits || query.q) } },
+      { contactName: { $regex: name, $options: 'i' } },
     ];
   }
   return combine(filter, recordScope(user, { staff: 'staff' }));
@@ -439,7 +613,8 @@ async function callsInRange(user, query) {
   const timezone = (await getGeneral()).timezone;
   const range = viewRange(query, timezone);
   const filter = callFilter(user, withoutDates(query));
-  filter.startedAt = { $gte: range.start, $lt: range.end };
+  const explicitRange = query.preset || query.startDate || query.endDate || query.dateFrom || query.dateTo || query.from || query.to || query.date;
+  if (!query.leadId || explicitRange) filter.startedAt = { $gte: range.start, $lt: range.end };
   return { filter, range, timezone };
 }
 
@@ -466,9 +641,12 @@ async function summarizeCalls(match) {
         total: { $sum: 1 },
         outgoing: { $sum: { $cond: [{ $eq: ['$callType', 'outgoing'] }, 1, 0] } },
         incoming: { $sum: { $cond: [{ $eq: ['$callType', 'incoming'] }, 1, 0] } },
-        missed: { $sum: { $cond: [{ $eq: ['$callType', 'missed'] }, 1, 0] } },
+        missed: { $sum: { $cond: [{ $or: [{ $eq: ['$callType', 'missed'] }, { $eq: ['$status', 'missed'] }] }, 1, 0] } },
         connected: { $sum: { $cond: [{ $eq: ['$status', 'connected'] }, 1, 0] } },
-        notConnected: { $sum: { $cond: [{ $in: ['$status', ['not_connected', 'rejected']] }, 1, 0] } },
+        notConnected: { $sum: { $cond: [{ $in: ['$status', ['not_connected', 'no_answer']] }, 1, 0] } },
+        rejected: { $sum: { $cond: [{ $eq: ['$status', 'rejected'] }, 1, 0] } },
+        busy: { $sum: { $cond: [{ $eq: ['$status', 'busy'] }, 1, 0] } },
+        failed: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
         duration: { $sum: '$durationSeconds' },
         longest: { $max: '$durationSeconds' },
         firstCall: { $min: '$startedAt' },
@@ -500,6 +678,10 @@ async function summarizeCalls(match) {
     missed: row.missed || 0,
     connected,
     notConnected: row.notConnected || 0,
+    rejected: row.rejected || 0,
+    busy: row.busy || 0,
+    failed: row.failed || 0,
+    connectionRate: row.total ? Math.round((connected / row.total) * 1000) / 10 : 0,
     uniqueNumbers: unique,
     repeatCalls: Math.max(0, (row.total || 0) - unique),
     totalDuration: row.duration || 0,
@@ -540,11 +722,16 @@ async function analytics(user, query = {}) {
       { $group: {
         _id: '$staff',
         total: { $sum: 1 },
+        outgoing: { $sum: { $cond: [{ $eq: ['$callType', 'outgoing'] }, 1, 0] } },
+        incoming: { $sum: { $cond: [{ $eq: ['$callType', 'incoming'] }, 1, 0] } },
         connected: { $sum: { $cond: [{ $eq: ['$status', 'connected'] }, 1, 0] } },
+        missed: { $sum: { $cond: [{ $or: [{ $eq: ['$callType', 'missed'] }, { $eq: ['$status', 'missed'] }] }, 1, 0] } },
         duration: { $sum: '$durationSeconds' },
+        lastCall: { $max: '$startedAt' },
+        numbers: { $addToSet: '$phoneNormalized' },
       } },
-      { $sort: { connected: -1 } },
-      { $limit: 20 },
+      { $sort: { total: -1 } },
+      { $limit: 200 },
     ]),
   ]);
   const staffIds = byStaff.map((row) => row._id);
@@ -556,16 +743,27 @@ async function analytics(user, query = {}) {
       timezone,
       period: { preset: range.preset, label: range.label, from: range.from, to: range.to, start: range.start, end: range.end },
       note: `${range.label} is read from the database. Android sync rows are device-verified call logs. Demo seed and manual rows are not device-verified.`,
-      hourly: hourly.map((row) => ({ hour: row._id, count: row.count, connected: row.connected })),
+      hourly: hourly.map((row) => ({ hour: row._id, count: row.count, connected: row.connected, duration: row.duration })),
       daily: daily.map((row) => ({ date: row._id, count: row.count, duration: row.duration })),
-      staff: byStaff.map((row) => ({
-        staffId: row._id,
-        name: peopleById.get(String(row._id))?.name || 'Unknown',
-        team: peopleById.get(String(row._id))?.team?.name || '',
-        total: row.total,
-        connected: row.connected,
-        duration: row.duration,
-      })),
+      staff: byStaff.map((row) => {
+        const person = peopleById.get(String(row._id));
+        const connectedCount = row.connected || 0;
+        return {
+          staffId: row._id,
+          name: person?.name || 'Unknown',
+          team: person?.team?.name || '',
+          total: row.total,
+          outgoing: row.outgoing || 0,
+          incoming: row.incoming || 0,
+          connected: connectedCount,
+          missed: row.missed || 0,
+          duration: row.duration || 0,
+          averageDuration: connectedCount ? Math.round((row.duration || 0) / connectedCount) : 0,
+          uniqueNumbers: (row.numbers || []).filter(Boolean).length,
+          lastCall: row.lastCall || null,
+        };
+      }).filter((row) => !query.q || row.name.toLowerCase().includes(String(query.q).trim().toLowerCase())),
+      activeEmployees: byStaff.length,
     },
   };
 }
@@ -672,6 +870,127 @@ async function syncStatus(user) {
   return { data: { devices: devices.map((device) => ({ ...device, tokenHash: undefined })), lastBatch: last } };
 }
 
+async function employeeReport(user, staffId, query) {
+  const person = await User.findOne({ _id: staffId, deletedAt: null, ...recordScope(user, { staff: '_id' }) }).select('name team branch');
+  if (!person) throw new AppError('Employee not found', 404);
+  const reportQuery = { ...query, staff: String(person._id) };
+  const { filter: match, range, timezone } = await callsInRange(user, reportQuery);
+  const [summary, daily, weekly, leads, followups] = await Promise.all([
+    summarizeCalls(match),
+    CallLog.aggregate([
+      { $match: match },
+      { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$startedAt', timezone } }, count: { $sum: 1 }, connected: { $sum: { $cond: [{ $eq: ['$status', 'connected'] }, 1, 0] } }, duration: { $sum: '$durationSeconds' } } },
+      { $sort: { _id: 1 } },
+    ]),
+    CallLog.aggregate([
+      { $match: match },
+      { $group: { _id: { $dateToString: { format: '%G-W%V', date: '$startedAt', timezone } }, count: { $sum: 1 }, duration: { $sum: '$durationSeconds' } } },
+      { $sort: { _id: 1 } },
+    ]),
+    CallLog.aggregate([
+      { $match: { ...match, lead: { $ne: null } } },
+      { $group: { _id: '$lead', calls: { $sum: 1 }, duration: { $sum: '$durationSeconds' } } },
+      { $sort: { calls: -1 } },
+      { $limit: 8 },
+    ]),
+    FollowUp.countDocuments({ assignedTo: person._id, status: 'completed', completedAt: { $gte: range.start, $lt: range.end } }),
+  ]);
+  const leadDocs = await Lead.find({ _id: { $in: leads.map((row) => row._id) } }).select('name leadCode').lean();
+  const leadById = new Map(leadDocs.map((lead) => [String(lead._id), lead]));
+  return {
+    data: {
+      employee: { id: person._id, name: person.name },
+      period: { label: range.label, from: range.from, to: range.to },
+      summary: { ...summary, followupsCompleted: followups },
+      daily: daily.map((row) => ({ date: row._id, count: row.count, connected: row.connected, duration: row.duration })),
+      weekly: weekly.map((row) => ({ week: row._id, count: row.count, duration: row.duration })),
+      leads: leads.map((row) => ({
+        leadId: row._id,
+        name: leadById.get(String(row._id))?.name || 'Lead',
+        leadCode: leadById.get(String(row._id))?.leadCode || '',
+        calls: row.calls,
+        duration: row.duration,
+      })),
+    },
+  };
+}
+
+async function addCallNote(user, id, body, meta) {
+  const call = await CallLog.findOne({ _id: id, ...recordScope(user, { staff: 'staff' }) });
+  if (!call) throw new AppError('Call not found', 404);
+  call.notes = String(body.text || body.note || '').trim();
+  await call.save();
+  if (call.lead) {
+    await addActivity({
+      lead: call.lead, type: 'note_added', actor: user,
+      description: `Call note: ${call.notes}`,
+      metadata: { callId: call.id },
+    });
+  }
+  await recordAudit({
+    user: user._id, username: user.username, action: 'call.note', module: 'calls', recordId: call.id, ...meta,
+  });
+  return { data: presentCall(call.toObject()), message: 'Call note saved' };
+}
+
+async function playRecording(user, id, meta) {
+  const recording = await CallRecording.findOne({ _id: id, ...recordScope(user, { staff: 'staff' }) }).select('+accessReference +storageKey');
+  if (!recording) throw new AppError('Recording not found', 404);
+  const signed = await recordingStore.signPlayback(recording);
+  await recordAudit({
+    user: user._id, username: user.username, action: 'recording.play', module: 'recordings', recordId: recording.id,
+    newValues: { recordingId: recording.recordingId, playable: signed.playable }, ...meta,
+  });
+  return {
+    data: {
+      id: recording.id,
+      recordingId: recording.recordingId,
+      status: recording.status,
+      playable: signed.playable,
+      url: signed.url,
+      expiresIn: signed.expiresIn,
+      reason: signed.reason,
+    },
+    message: signed.playable ? 'Playback link ready' : signed.reason,
+  };
+}
+
+async function exportEmployees(user, query) {
+  const result = await analytics(user, query);
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = COMPANY.productName;
+  const sheet = workbook.addWorksheet('Employees');
+  const headers = ['Employee', 'Total calls', 'Outgoing', 'Incoming', 'Connected', 'Missed', 'Talk seconds', 'Average seconds', 'Unique numbers', 'Last call'];
+  sheet.addRow(headers);
+  result.data.staff.forEach((row) => sheet.addRow([
+    row.name, row.total, row.outgoing, row.incoming, row.connected, row.missed, row.duration, row.averageDuration, row.uniqueNumbers, row.lastCall ? new Date(row.lastCall) : '',
+  ]));
+  return {
+    download: {
+      buffer: Buffer.from(await workbook.xlsx.writeBuffer()),
+      mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      filename: `calling-employees-${result.data.period.from}-to-${result.data.period.to}.xlsx`,
+    },
+  };
+}
+
+function integrations() {
+  const storage = recordingStore.publicStatus();
+  return {
+    data: {
+      manual: { ready: true, detail: 'Authorized staff can save a call from Call History. It is labeled manual and is not a device call log.' },
+      android: { ready: true, detail: 'Install this website on the phone from the browser menu. That does not grant Android call-log permission. Tap Call to open the phone dialer, then save the result when you return. Reading the SIM call log still needs the separate Android app, which is not available to install right now.' },
+      telephony: { ready: true, detail: 'On the phone, Call opens the normal dialer and uses the SIM. There is no paid calling service. The website cannot read the call log, so the result is saved only after you enter it.' },
+      recordings: {
+        ready: true,
+        detail: storage.configured
+          ? 'Private cloud storage is configured. The phone can also upload a recording its dialer already saved. Playback uses a short private link.'
+          : 'The phone can upload a recording its dialer already saved. The file stays on this server and plays through a short private link. The app does not secretly record the call.',
+      },
+    },
+  };
+}
+
 module.exports = {
   registerDevice,
   listDevices,
@@ -680,6 +999,11 @@ module.exports = {
   syncCalls,
   syncContacts,
   syncRecording,
+  uploadRecording,
+  uploadStaffRecording,
+  queueDial,
+  claimDial,
+  finishDial,
   createManual,
   listCalls,
   analytics,
@@ -688,6 +1012,11 @@ module.exports = {
   createLeadFromContact,
   listRecordings,
   revealRecording,
+  playRecording,
+  addCallNote,
+  employeeReport,
+  exportEmployees,
+  integrations,
   syncHistory,
   syncStatus,
   recordCall,

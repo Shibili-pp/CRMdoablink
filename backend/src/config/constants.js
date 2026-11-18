@@ -146,8 +146,8 @@ const HEADER_ALIASES = {
 };
 
 const CALL_TYPES = ['incoming', 'outgoing', 'missed'];
-const CALL_STATUSES = ['connected', 'not_connected', 'missed', 'rejected', 'unknown'];
-const DATA_SOURCES = ['android_sync', 'manual', 'demo_seed'];
+const CALL_STATUSES = ['connected', 'not_connected', 'missed', 'rejected', 'busy', 'failed', 'no_answer', 'unknown'];
+const DATA_SOURCES = ['android_sync', 'manual', 'demo_seed', 'provider'];
 
 const COMPANY = {
   legalName: 'DOABLINK PRIVATE LIMITED',

@@ -1,8 +1,9 @@
 const ExcelJS = require('exceljs');
-const { HourlyReport, CallLog, FollowUp, Lead, LeadActivity, Payment, User } = require('../models');
+const { HourlyReport, HourlyManual, CallLog, FollowUp, Lead, LeadActivity, Payment, User } = require('../models');
 const { AppError, metaFor } = require('../utils/http');
 const { localHourRange, dateKeyFromDate, zonedParts, viewRange, combineLocal } = require('../utils/time');
 const { getGeneral } = require('./settings');
+const { recordAudit } = require('./audit');
 const { summarizeCalls } = require('./calls');
 const { recordScope, isElevated, staffScope } = require('./access');
 const { COMPANY, WON_STATUSES, POSITIVE_STATUSES } = require('../config/constants');
@@ -97,6 +98,22 @@ function windowBounds(query, timeZone) {
 
 function hasActivity(sheet) {
   return SHEET_COLUMNS.some(([key]) => Number(sheet?.[key]) > 0);
+}
+
+function cleanValues(values) {
+  const next = {};
+  SHEET_COLUMNS.forEach(([key]) => {
+    if (values?.[key] == null || values[key] === '') return;
+    const number = Number(values[key]);
+    if (!Number.isFinite(number) || number < 0) return;
+    next[key] = key === 'paymentCollected' ? Math.round(number * 100) / 100 : Math.round(number);
+  });
+  return next;
+}
+
+function applyManual(computed, manual) {
+  if (!manual?.values) return { ...computed, edited: false };
+  return { ...computed, ...cleanValues(manual.values), edited: true };
 }
 
 function whatsappText({ name, dateKey, hour, sheet }) {
@@ -289,10 +306,19 @@ async function windowReport(user, query) {
   const general = await getGeneral();
   const bounds = windowBounds(query, general.timezone);
   const people = await peopleFor(user, query);
+  const manuals = await HourlyManual.find({
+    staff: { $in: people.map((person) => person._id) },
+    dateKey: bounds.dateKey,
+    fromTime: bounds.fromTime,
+    toTime: bounds.toTime,
+  }).lean();
+  const manualByStaff = new Map(manuals.map((row) => [String(row.staff), row]));
   const rows = [];
   for (const person of people) {
-    const sheet = await sheetFor(person, bounds.start, bounds.end);
-    if (!hasActivity(sheet)) continue;
+    const computed = await sheetFor(person, bounds.start, bounds.end);
+    const manual = manualByStaff.get(String(person._id));
+    const sheet = applyManual(computed, manual);
+    if (!hasActivity(sheet) && !manual) continue;
     rows.push({ staffId: person._id, name: person.name, ...sheet });
   }
   const totals = sumSheets(rows);
@@ -331,6 +357,57 @@ async function day(user, query) {
       text: blocks.join('\n\n'),
     },
   };
+}
+
+async function personInScope(user, staffId) {
+  const people = await peopleFor(user, { staff: staffId });
+  return people.find((person) => String(person._id) === String(staffId));
+}
+
+async function saveManual(user, body, meta) {
+  const person = await personInScope(user, body.staffId);
+  if (!person) throw new AppError('That person is outside your report', 403);
+  const general = await getGeneral();
+  const bounds = windowBounds(body, general.timezone);
+  const values = cleanValues(body.values);
+  const doc = await HourlyManual.findOneAndUpdate(
+    { staff: person._id, dateKey: bounds.dateKey, fromTime: bounds.fromTime, toTime: bounds.toTime },
+    {
+      staff: person._id,
+      team: person.team,
+      branch: person.branch,
+      dateKey: bounds.dateKey,
+      fromTime: bounds.fromTime,
+      toTime: bounds.toTime,
+      periodStart: bounds.start,
+      periodEnd: bounds.end,
+      values,
+      updatedBy: user._id,
+    },
+    { upsert: true, new: true }
+  );
+  await recordAudit({
+    user: user._id, username: user.username, action: 'hourly.manual', module: 'hourly', recordId: doc.id,
+    newValues: { staff: person.name, period: bounds.label, values }, ...meta,
+  });
+  return { data: { id: doc.id, staffId: person._id, ...values, edited: true }, message: 'Hourly numbers saved' };
+}
+
+async function clearManual(user, body, meta) {
+  const person = await personInScope(user, body.staffId);
+  if (!person) throw new AppError('That person is outside your report', 403);
+  const general = await getGeneral();
+  const bounds = windowBounds(body, general.timezone);
+  const removed = await HourlyManual.findOneAndDelete({
+    staff: person._id, dateKey: bounds.dateKey, fromTime: bounds.fromTime, toTime: bounds.toTime,
+  });
+  if (removed) {
+    await recordAudit({
+      user: user._id, username: user.username, action: 'hourly.manual.clear', module: 'hourly', recordId: removed.id,
+      oldValues: { staff: person.name, period: bounds.label }, ...meta,
+    });
+  }
+  return { data: { cleared: Boolean(removed) }, message: 'Activity numbers restored' };
 }
 
 async function generate(user, body) {
@@ -435,5 +512,5 @@ async function assertHourlySums(staffId, dateKey) {
 }
 
 module.exports = {
-  list, generate, whatsapp, day, windowReport, exportReport, generateForStaff, generateElapsed, whatsappText, assertHourlySums, SHEET_COLUMNS,
+  list, generate, whatsapp, day, windowReport, exportReport, saveManual, clearManual, generateForStaff, generateElapsed, whatsappText, assertHourlySums, SHEET_COLUMNS,
 };

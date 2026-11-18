@@ -28,6 +28,10 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
 });
+const recordingUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
 
 const q = validate({ query: schemas.query });
 const id = validate({ params: schemas.idParam });
@@ -48,6 +52,18 @@ router.post('/auth/logout', action((req) => auth.logout(req, req.res)));
 router.post('/android/calls/sync', requireDevice, validate({ body: schemas.callSync }), action((req) => calls.syncCalls(req.device, req.user, req.body)));
 router.post('/android/contacts/sync', requireDevice, validate({ body: schemas.contactSync }), action((req) => calls.syncContacts(req.device, req.user, req.body)));
 router.post('/android/recordings/sync', requireDevice, validate({ body: schemas.recordingSync }), action((req) => calls.syncRecording(req.device, req.user, req.body)));
+router.post('/android/recordings/upload', requireDevice, recordingUpload.single('file'), action((req) => calls.uploadRecording(req.device, req.user, req.file, req.body)));
+router.get('/android/dial/next', requireDevice, action((req) => calls.claimDial(req.device, req.user)));
+router.post('/android/dial/:id/result', requireDevice, id, validate({ body: schemas.dialResult }), action((req) => calls.finishDial(req.device, req.user, req.params.id, req.body)));
+router.get('/call-recordings/stream/:token', (req, res) => {
+  const fs = require('fs');
+  const recordingStore = require('../services/recordingStore');
+  const stream = recordingStore.readStream(req.params.token);
+  if (!stream) return res.status(404).json({ success: false, message: 'This playback link has expired', data: null });
+  res.setHeader('Content-Type', stream.mime);
+  res.setHeader('Cache-Control', 'private, no-store');
+  fs.createReadStream(stream.file).pipe(res);
+});
 
 router.use(requireAuth);
 router.get('/auth/me', action((req) => auth.me(req.user)));
@@ -153,9 +169,16 @@ router.post('/followups/:id/remind', requirePermission('followups.manage'), id, 
 router.post('/followups/reassign', requirePermission('followups.manage'), validate({ body: schemas.reassign }), action((req, meta) => followups.reassignFromStaff(req.user, req.body, meta)));
 
 router.get('/calls/analytics', requirePermission('calls.view'), q, action((req) => calls.analytics(req.user, req.query)));
+router.get('/calls/employees/export', requirePermission('calls.view'), q, action((req) => calls.exportEmployees(req.user, req.query)));
+router.get('/calls/staff/:id', requirePermission('calls.view'), id, q, action((req) => calls.employeeReport(req.user, req.params.id, req.query)));
 router.get('/calls', requirePermission('calls.view'), q, action((req) => calls.listCalls(req.user, req.query)));
 router.post('/calls/manual', requirePermission('calls.manual'), validate({ body: schemas.manualCall }), action((req, meta) => calls.createManual(req.user, req.body, meta)));
+router.post('/calls/dial', requirePermission('calls.manual'), validate({ body: schemas.dialRequest }), action((req) => calls.queueDial(req.user, req.body)));
+router.post('/calls/:id/notes', requirePermission('calls.manual'), id, validate({ body: schemas.note }), action((req, meta) => calls.addCallNote(req.user, req.params.id, req.body, meta)));
+router.get('/calling/integrations', requirePermission('calls.view'), action(() => calls.integrations()));
 router.get('/call-recordings', requirePermission('recordings.view'), q, action((req) => calls.listRecordings(req.user, req.query)));
+router.post('/call-recordings/upload', requirePermission('calls.manual'), recordingUpload.single('file'), action((req, meta) => calls.uploadStaffRecording(req.user, req.file, req.body, meta)));
+router.get('/call-recordings/:id/play', requirePermission('recordings.view'), id, action((req, meta) => calls.playRecording(req.user, req.params.id, meta)));
 router.get('/call-recordings/:id', requirePermission('recordings.view'), id, action((req, meta) => calls.revealRecording(req.user, req.params.id, meta)));
 router.get('/contacts', requirePermission('contacts.view'), q, action((req) => calls.listContacts(req.user, req.query)));
 router.post('/contacts/:id/create-lead', requirePermission('leads.create'), id, action((req, meta) => calls.createLeadFromContact(req.user, req.params.id, meta)));
@@ -173,6 +196,8 @@ router.get('/hourly-reports/day', requirePermission('hourly.view'), q, action((r
 router.get('/hourly-reports/export', requirePermission('hourly.view'), q, action((req) => hourly.exportReport(req.user, req.query)));
 router.get('/hourly-reports', requirePermission('hourly.view'), q, action((req) => hourly.list(req.user, req.query)));
 router.post('/hourly-reports/generate', requirePermission('hourly.view'), validate({ body: schemas.hourlyGenerate }), action((req) => hourly.generate(req.user, req.body)));
+router.post('/hourly-reports/manual', requirePermission('hourly.view'), validate({ body: schemas.hourlyManual }), action((req, meta) => hourly.saveManual(req.user, req.body, meta)));
+router.delete('/hourly-reports/manual', requirePermission('hourly.view'), validate({ body: schemas.hourlyManualKey }), action((req, meta) => hourly.clearManual(req.user, req.body, meta)));
 
 router.get('/targets', requirePermission('targets.view'), q, action((req) => targets.list(req.user, req.query)));
 router.post('/targets', requirePermission('targets.manage'), validate({ body: schemas.target }), action((req, meta) => targets.create(req.user, req.body, meta)));

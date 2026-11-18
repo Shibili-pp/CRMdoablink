@@ -38,7 +38,7 @@ class ConsentActivity : AppCompatActivity() {
                 textSize = 24f
             })
             addView(TextView(this@ConsentActivity).apply {
-                text = "DoablinkOrbit reads this phone's call log and sends the number, time and duration to your CRM. It does not upload call recordings. Contacts are sent only if you allow them."
+                text = "DoablinkOrbit reads this phone's call log and sends the number, time and duration to your CRM. Calls queued from the CRM use this phone's SIM only after you confirm them. Recordings are not uploaded unless you later choose the folder where the dialer saved them."
                 setPadding(0, 16, 0, 24)
             })
             addView(Button(this@ConsentActivity).apply {

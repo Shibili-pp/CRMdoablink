@@ -216,8 +216,12 @@ const callLogSchema = new Schema({
   callType: { type: String, enum: ['incoming', 'outgoing', 'missed'], required: true },
   startedAt: { type: Date, required: true, index: true },
   durationSeconds: { type: Number, default: 0 },
-  status: { type: String, enum: ['connected', 'not_connected', 'missed', 'rejected', 'unknown'], default: 'unknown' },
-  dataSource: { type: String, enum: ['android_sync', 'manual', 'demo_seed'], required: true, index: true },
+  status: { type: String, enum: ['connected', 'not_connected', 'missed', 'rejected', 'busy', 'failed', 'no_answer', 'unknown'], default: 'unknown' },
+  dataSource: { type: String, enum: ['android_sync', 'manual', 'demo_seed', 'provider'], required: true, index: true },
+  contactName: { type: String, default: '' },
+  notes: { type: String, default: '' },
+  provider: { type: String, default: '' },
+  providerCallId: { type: String, default: '' },
   recordingId: String,
   syncedAt: Date,
   enteredBy: { type: Schema.Types.ObjectId, ref: 'User' },
@@ -236,10 +240,31 @@ const callRecordingSchema = new Schema({
   device: { type: Schema.Types.ObjectId, ref: 'AndroidDevice' },
   status: { type: String, enum: ['available', 'pending', 'unavailable', 'restricted'], default: 'pending' },
   accessReference: { type: String, select: false },
+  storageKey: { type: String, select: false, default: '' },
+  mimeType: { type: String, default: '' },
+  byteSize: { type: Number, default: 0 },
   durationSeconds: Number,
-  dataSource: { type: String, enum: ['android_sync', 'manual', 'demo_seed'], default: 'android_sync' },
+  phoneNormalized: { type: String, default: '' },
+  dataSource: { type: String, enum: ['android_sync', 'manual', 'demo_seed', 'provider'], default: 'android_sync' },
   isDemo: { type: Boolean, default: false },
 }, { timestamps: true });
+
+const dialRequestSchema = new Schema({
+  staff: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  requestedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+  lead: { type: Schema.Types.ObjectId, ref: 'Lead' },
+  phone: String,
+  phoneNormalized: { type: String, required: true },
+  contactName: { type: String, default: '' },
+  provider: { type: String, default: 'sim' },
+  status: { type: String, enum: ['pending', 'dialing', 'completed', 'cancelled', 'failed'], default: 'pending', index: true },
+  device: { type: Schema.Types.ObjectId, ref: 'AndroidDevice' },
+  androidEventId: { type: String, default: '' },
+  claimedAt: Date,
+  completedAt: Date,
+  failureReason: { type: String, default: '' },
+}, { timestamps: true });
+dialRequestSchema.index({ staff: 1, status: 1, createdAt: 1 });
 
 const androidDeviceSchema = new Schema({
   staff: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -310,6 +335,20 @@ const hourlyReportSchema = new Schema({
   generatedAt: { type: Date, default: Date.now },
 }, { timestamps: true });
 hourlyReportSchema.index({ staff: 1, periodStart: 1 }, { unique: true });
+
+const hourlyManualSchema = new Schema({
+  staff: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  team: { type: Schema.Types.ObjectId, ref: 'Team' },
+  branch: { type: Schema.Types.ObjectId, ref: 'Branch' },
+  dateKey: { type: String, required: true },
+  fromTime: { type: String, required: true },
+  toTime: { type: String, required: true },
+  periodStart: { type: Date, required: true },
+  periodEnd: { type: Date, required: true },
+  values: { type: Schema.Types.Mixed, default: {} },
+  updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+hourlyManualSchema.index({ staff: 1, dateKey: 1, fromTime: 1, toTime: 1 }, { unique: true });
 
 const targetSchema = new Schema({
   name: { type: String, required: true },
@@ -475,10 +514,12 @@ module.exports = {
   FollowUp: model('FollowUp', followUpSchema),
   CallLog: model('CallLog', callLogSchema),
   CallRecording: model('CallRecording', callRecordingSchema),
+  DialRequest: model('DialRequest', dialRequestSchema),
   AndroidDevice: model('AndroidDevice', androidDeviceSchema),
   SyncedContact: model('SyncedContact', syncedContactSchema),
   SyncBatch: model('SyncBatch', syncBatchSchema),
   HourlyReport: model('HourlyReport', hourlyReportSchema),
+  HourlyManual: model('HourlyManual', hourlyManualSchema),
   Target: model('Target', targetSchema),
   RevenueOpportunity: model('RevenueOpportunity', opportunitySchema),
   Payment: model('Payment', paymentSchema),

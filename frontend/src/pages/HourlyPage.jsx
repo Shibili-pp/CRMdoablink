@@ -1,23 +1,27 @@
 import { useEffect, useState } from 'react';
 import api, { downloadFile } from '../api/client';
-import { DataTable, Page } from '../components/ui';
+import { DataTable, Field, Modal, Page } from '../components/ui';
 import { messageFrom, useApp } from '../context/AppContext';
 
 const COLUMNS = [
-  ['totalCalls', 'Total Calls'],
-  ['connectedCalls', 'Connected Calls'],
-  ['prospective', 'Prospective'],
-  ['demoBooked', 'Demo Booked'],
-  ['demoCompleted', 'Demo Completed'],
-  ['followups', 'Follow-ups'],
-  ['interestedToBuy', 'Interested to Buy'],
-  ['subscriptionClosed', 'Subscription Closed'],
-  ['paymentCollected', 'Payment Collected'],
-  ['notInterested', 'Not Interested'],
-  ['dnp', 'DNP'],
-  ['rescheduled', 'Rescheduled'],
-  ['totalCallDuration', 'Total Call Duration'],
+  ['totalCalls', 'Total Calls', 'Total outgoing calls'],
+  ['connectedCalls', 'Connected Calls', 'Calls answered and meaningful conversations'],
+  ['prospective', 'Prospective', 'Potential customers identified'],
+  ['demoBooked', 'Demo Booked', 'Demos scheduled'],
+  ['demoCompleted', 'Demo Completed', 'Demos successfully conducted'],
+  ['followups', 'Follow-ups', 'Follow-up calls completed'],
+  ['interestedToBuy', 'Interested to Buy', 'Clients showing buying interest'],
+  ['subscriptionClosed', 'Subscription Closed', 'Clients who subscribed'],
+  ['paymentCollected', 'Payment Collected', 'Actual money collected'],
+  ['notInterested', 'Not Interested', 'Leads rejected'],
+  ['dnp', 'DNP', 'Did not pick up'],
+  ['rescheduled', 'Rescheduled', 'Demos postponed'],
+  ['totalCallDuration', 'Total Call Duration', 'Talk time on outgoing calls'],
 ];
+
+function blankValues() {
+  return Object.fromEntries(COLUMNS.map(([key]) => [key, 0]));
+}
 
 function todayKey() {
   const now = new Date();
@@ -53,7 +57,7 @@ function withTotal(report) {
 }
 
 export default function HourlyPage() {
-  const { toast, can } = useApp();
+  const { user, toast, can } = useApp();
   const today = todayKey();
   const [view, setView] = useState('hourly');
   const [date, setDate] = useState(today);
@@ -67,6 +71,9 @@ export default function HourlyPage() {
   const [dayReport, setDayReport] = useState(null);
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(true);
+  const [editor, setEditor] = useState(null);
+  const [values, setValues] = useState(blankValues);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!can('staff.view')) return;
@@ -123,12 +130,72 @@ export default function HourlyPage() {
     }
   };
 
+  const openEditor = (row) => {
+    const next = blankValues();
+    if (row) {
+      COLUMNS.forEach(([key]) => {
+        next[key] = key === 'totalCallDuration' ? Math.round((Number(row[key]) || 0) / 60) : (Number(row[key]) || 0);
+      });
+      setEditor({ staffId: row.staffId, name: row.staff, edited: Boolean(row.edited) });
+    } else {
+      const self = people[0] || { id: user?.id, name: user?.name };
+      setEditor({ staffId: staffId || self?.id || '', name: '', edited: false, adding: true });
+    }
+    setValues(next);
+  };
+
+  const payloadValues = () => {
+    const body = {};
+    COLUMNS.forEach(([key]) => {
+      body[key] = key === 'totalCallDuration' ? Math.round(Number(values[key]) || 0) * 60 : Number(values[key]) || 0;
+    });
+    return body;
+  };
+
+  const saveNumbers = async (event) => {
+    event.preventDefault();
+    if (!editor?.staffId) return toast('Choose a person', 'error');
+    setSaving(true);
+    try {
+      await api.post('/api/v1/hourly-reports/manual', {
+        staffId: editor.staffId,
+        date,
+        fromTime,
+        toTime,
+        values: payloadValues(),
+      });
+      toast('Hourly numbers saved');
+      setEditor(null);
+      load();
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const restoreNumbers = async () => {
+    if (!editor?.staffId) return;
+    setSaving(true);
+    try {
+      await api.delete('/api/v1/hourly-reports/manual', { data: { staffId: editor.staffId, date, fromTime, toTime } });
+      toast('Activity numbers restored');
+      setEditor(null);
+      load();
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const hourlyRows = withTotal(windowReport);
   const dayRows = withTotal(dayReport);
 
   return (
     <Page title="Hourly reports" subtitle="Today is the default. The table shows only the time you enter, for every role." actions={
       <>
+        {view === 'hourly' && <button className="btn secondary" type="button" onClick={() => openEditor(null)}>Add numbers</button>}
         <button className="btn secondary" type="button" onClick={excel}>Excel</button>
         <button className="btn" type="button" onClick={copy}>Copy report</button>
       </>
@@ -165,15 +232,49 @@ export default function HourlyPage() {
           </label>
         </div>
       )}
-      <p className="muted">Type any time, including minutes such as 01:30. Only people with calls or updates in that range are listed. Empty hours are left out.</p>
+      <p className="muted">Numbers start from calls, status changes, follow-ups and payments in this time. Edit or add a row to store your own figures for this exact time.</p>
+      <details className="card">
+        <summary>What these numbers mean</summary>
+        <ul className="preset-list">
+          {COLUMNS.map(([key, label, hint]) => <li key={key}><span>{label}</span><span className="muted">{hint}</span></li>)}
+        </ul>
+      </details>
       {view === 'hourly' && windowReport && <div className="banner">Showing {windowReport.period?.label} from the database.</div>}
       {view === 'day' && dayReport && <div className="banner">Showing {dayReport.period?.label} from the database.</div>}
       {view === 'hourly' ? (
-        <DataTable loading={loading} rows={hourlyRows} empty="Nothing was recorded in this time." columns={[{ key: 'staff', label: 'Staff' }, ...metricColumns()]} />
+        <DataTable loading={loading} rows={hourlyRows} empty="Nothing was recorded in this time." columns={[
+          { key: 'staff', label: 'Staff', render: (row) => row.id === 'total' ? row.staff : `${row.staff}${row.edited ? ' · Edited' : ''}` },
+          ...metricColumns(),
+          { key: 'edit', label: '', render: (row) => row.id === 'total' ? null : <button className="btn secondary" type="button" onClick={() => openEditor(row)}>Edit</button> },
+        ]} />
       ) : (
         <DataTable loading={loading} rows={dayRows} empty="Nothing was recorded in this date range." columns={[{ key: 'staff', label: 'Staff' }, ...metricColumns()]} />
       )}
       {text && <pre className="card" style={{ whiteSpace: 'pre-wrap' }}>{text}</pre>}
+      {editor && (
+        <Modal title={editor.adding ? 'Add hourly numbers' : `Edit ${editor.name}`} onClose={() => setEditor(null)}>
+          <form className="form-grid" onSubmit={saveNumbers}>
+            {editor.adding && (
+              <Field label="Person" full>
+                <select aria-label="Person" value={editor.staffId} onChange={(event) => setEditor({ ...editor, staffId: event.target.value })} required>
+                  <option value="">Choose</option>
+                  {(people.length ? people : [{ id: user?.id, name: user?.name }]).map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
+                </select>
+              </Field>
+            )}
+            {COLUMNS.map(([key, label, hint]) => (
+              <Field key={key} label={key === 'totalCallDuration' ? 'Total call duration (minutes)' : key === 'paymentCollected' ? 'Payment collected (₹)' : label}>
+                <input aria-label={label} type="number" min="0" step={key === 'paymentCollected' ? '1' : '1'} value={values[key]} onChange={(event) => setValues({ ...values, [key]: event.target.value })} />
+                <span className="muted">{hint}</span>
+              </Field>
+            ))}
+            <div className="full actions">
+              <button className="btn" type="submit" disabled={saving}>Save</button>
+              {editor.edited && <button className="btn secondary" type="button" disabled={saving} onClick={restoreNumbers}>Use activity numbers</button>}
+            </div>
+          </form>
+        </Modal>
+      )}
     </Page>
   );
 }
