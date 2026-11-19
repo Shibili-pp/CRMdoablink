@@ -38,8 +38,10 @@ const CALL_TARGETS = new Set(['daily_calls', 'daily_connected_calls', 'call_dura
 
 function clock(value) {
   if (!value) return '—';
-  return new Date(value).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  return new Date(value).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
+
+const CALL_DETAIL_ROLES = new Set(['OWNER', 'SUPER_ADMIN', 'ADMIN', 'TEAM_LEADER']);
 
 function rangeQuery(preset, from, to) {
   const params = new URLSearchParams();
@@ -51,7 +53,7 @@ function rangeQuery(preset, from, to) {
 }
 
 export default function CallsPage() {
-  const { toast, can } = useApp();
+  const { toast, can, user } = useApp();
   const navigate = useNavigate();
   const [section, setSection] = useState('overview');
   const [preset, setPreset] = useState('today');
@@ -76,6 +78,11 @@ export default function CallsPage() {
   const [integrations, setIntegrations] = useState(null);
   const [note, setNote] = useState({});
   const [manual, setManual] = useState({ phone: '', contactName: '', callType: 'outgoing', status: 'connected', durationMinutes: 1, startedAt: new Date().toISOString().slice(0, 16), notes: '' });
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailCalls, setDetailCalls] = useState([]);
+  const [detailMeta, setDetailMeta] = useState({ page: 1, pages: 1 });
+  const [detailPage, setDetailPage] = useState(1);
+  const canOpenCalls = CALL_DETAIL_ROLES.has(user?.role);
 
   const params = () => {
     const next = rangeQuery(preset, from, to);
@@ -103,6 +110,16 @@ export default function CallsPage() {
       }).catch((error) => toast(messageFrom(error), 'error'));
     }
   }, [section, preset, from, to, staffId, page, query, employeeQuery]);
+
+  useEffect(() => {
+    if (!detailOpen || section !== 'overview' || !canOpenCalls) return undefined;
+    const queryString = params().toString();
+    api.get(`/api/v1/calls?limit=25&page=${detailPage}&${queryString}`).then((response) => {
+      setDetailCalls(response.data.data || []);
+      setDetailMeta(response.data.meta || { page: 1, pages: 1 });
+    }).catch((error) => toast(messageFrom(error), 'error'));
+    return undefined;
+  }, [detailOpen, section, preset, from, to, staffId, detailPage, canOpenCalls]);
 
   useEffect(() => {
     if (section === 'recordings') {
@@ -171,22 +188,28 @@ export default function CallsPage() {
         {(section === 'overview' || section === 'employees') && <button className="btn secondary" type="button" onClick={() => downloadFile(`/api/v1/calls/employees/export?${params().toString()}`, 'calling-employees.xlsx').then(() => toast('Excel downloaded')).catch((error) => toast(messageFrom(error), 'error'))}>Excel</button>}
       </>
     }>
-      <div className="follow-switch" role="tablist" aria-label="Calling sections">
-        {SECTIONS.map(([key, label]) => (
-          <button key={key} className={`btn ${section === key ? '' : 'secondary'}`} type="button" aria-pressed={section === key} onClick={() => setSection(key)}>{label}</button>
-        ))}
+      <div className="toolbar" role="tablist" aria-label="Calling sections">
+        <div className="segment segment-scroll">
+          {SECTIONS.map(([key, label]) => (
+            <button key={key} className={`btn ${section === key ? '' : 'secondary'}`} type="button" aria-pressed={section === key} onClick={() => setSection(key)}>{label}</button>
+          ))}
+        </div>
       </div>
       {['overview', 'history', 'employees', 'person'].includes(section) && (
-        <div className="filters" role="group" aria-label="Call dates">
-          {PRESETS.map(([key, label]) => (
-            <button key={key} className={`btn ${preset === key ? '' : 'secondary'}`} type="button" onClick={() => { setFrom(''); setTo(''); setPreset(key); setPage(1); }}>{label}</button>
-          ))}
-          <label className="field"><span>From</span>
-            <input type="date" aria-label="From date" value={preset === 'range' ? from : (analytics?.period?.from || from)} onChange={(event) => { setFrom(event.target.value); setTo(preset === 'range' ? to : (analytics?.period?.to || event.target.value)); setPreset('range'); setPage(1); }} />
-          </label>
-          <label className="field"><span>To</span>
-            <input type="date" aria-label="To date" value={preset === 'range' ? to : (analytics?.period?.to || to)} onChange={(event) => { setFrom(preset === 'range' ? from : (analytics?.period?.from || event.target.value)); setTo(event.target.value); setPreset('range'); setPage(1); }} />
-          </label>
+        <div className="toolbar" role="group" aria-label="Call dates">
+          <div className="segment segment-scroll">
+            {PRESETS.map(([key, label]) => (
+              <button key={key} className={`btn ${preset === key ? '' : 'secondary'}`} type="button" onClick={() => { setFrom(''); setTo(''); setPreset(key); setPage(1); }}>{label}</button>
+            ))}
+          </div>
+          <div className="field-row">
+            <label className="field"><span>From</span>
+              <input type="date" aria-label="From date" value={preset === 'range' ? from : (analytics?.period?.from || from)} onChange={(event) => { setFrom(event.target.value); setTo(preset === 'range' ? to : (analytics?.period?.to || event.target.value)); setPreset('range'); setPage(1); }} />
+            </label>
+            <label className="field"><span>To</span>
+              <input type="date" aria-label="To date" value={preset === 'range' ? to : (analytics?.period?.to || to)} onChange={(event) => { setFrom(preset === 'range' ? from : (analytics?.period?.from || event.target.value)); setTo(event.target.value); setPreset('range'); setPage(1); }} />
+            </label>
+          </div>
           {can('staff.view') && section !== 'person' && (
             <label className="field"><span>Employee</span>
               <select aria-label="Employee" value={staffId} onChange={(event) => { setStaffId(event.target.value); setPage(1); }}>
@@ -200,7 +223,11 @@ export default function CallsPage() {
 
       {section === 'overview' && summary && (
         <>
-          <div className="banner">{analytics.note} Active employees: {analytics.activeEmployees || 0}. Connection rate: {summary.connectionRate || 0}%.</div>
+          <div className="banner">
+            {summary.total
+              ? `${analytics.note} Active employees: ${analytics.activeEmployees || 0}. Connection rate: ${summary.connectionRate || 0}%.`
+              : 'No calls are stored for this date. Installing this website does not give access to the phone call log, so your SIM history is not fetched. Open a lead, tap Call, and save the result after the call. That saved result is what appears here.'}
+          </div>
           <div className="grid stats">
             {[
               ['Total calls', summary.total, 'Every stored call in this period'],
@@ -214,10 +241,46 @@ export default function CallsPage() {
               ['Unique numbers', summary.uniqueNumbers, 'Distinct phone numbers'],
               ['Active employees', analytics.activeEmployees || 0, 'Employees with at least one call'],
               ['Connection rate', `${summary.connectionRate || 0}%`, 'Connected calls divided by total calls'],
-            ].map(([label, value, hint]) => (
-              <article key={label} className="card" title={hint}><div className="stat-label">{label}</div><div className={`stat-value ${typeof value === 'string' ? 'compact' : ''}`}>{value}</div></article>
-            ))}
+            ].map(([label, value, hint]) => {
+              const open = label === 'Total calls' && canOpenCalls;
+              return (
+                <article
+                  key={label}
+                  className={`card ${open ? 'stat-button' : ''}`}
+                  title={open ? 'Open each call in this period' : hint}
+                  role={open ? 'button' : undefined}
+                  tabIndex={open ? 0 : undefined}
+                  onClick={open ? () => { setDetailOpen(true); setDetailPage(1); } : undefined}
+                  onKeyDown={open ? (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setDetailOpen(true); setDetailPage(1); } } : undefined}
+                >
+                  <div className="stat-label">{label}</div>
+                  <div className={`stat-value ${typeof value === 'string' ? 'compact' : ''}`}>{value}</div>
+                </article>
+              );
+            })}
           </div>
+          {detailOpen && canOpenCalls && (
+            <article className="card panel-card">
+              <div className="modal-head">
+                <h3 className="panel-title">Calls in this period</h3>
+                <button className="btn secondary" type="button" onClick={() => setDetailOpen(false)}>Close</button>
+              </div>
+              <DataTable rows={detailCalls} empty="No calls in this period" page={detailMeta.page} pages={detailMeta.pages} onPage={setDetailPage} columns={[
+                { key: 'when', label: 'Date and time', render: (row) => clock(row.startedAt) },
+                { key: 'contactName', label: 'Contact name', render: (row) => row.contactName?.trim() || 'Not saved in phone' },
+                { key: 'phoneDisplay', label: 'Contact number' },
+                { key: 'callType', label: 'Direction', render: (row) => row.callType === 'incoming' ? 'Incoming' : row.callType === 'missed' ? 'Missed' : 'Outgoing' },
+                { key: 'durationSeconds', label: 'Duration', render: (row) => duration(row.durationSeconds) },
+                { key: 'employee', label: 'Staff', render: (row) => row.staff?.name || '—' },
+                { key: 'assignedLead', label: 'Lead assigned to this staff', render: (row) => row.assignedLead ? (
+                  <span className="actions">
+                    <span>{row.assignedLead.leadCode} {row.assignedLead.name}</span>
+                    <button className="btn secondary" type="button" onClick={() => navigate(`/leads/${row.assignedLead.id}`)}>View</button>
+                  </span>
+                ) : 'Not in this employee’s leads' },
+              ]} />
+            </article>
+          )}
           <div className="grid two" style={{ marginTop: 14 }}>
             <article className="card">
               <h3>Calls by hour</h3>

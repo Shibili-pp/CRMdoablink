@@ -11,6 +11,17 @@ const { canManageRole, staffScope, combine, isElevated, hasPermission } = requir
 const { publicUser } = require('./auth');
 const { getGeneral } = require('./settings');
 
+function workClock(value, fallback) {
+  if (value == null || value === '') return fallback;
+  const match = String(value).match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  if (!match) throw new AppError('Enter a valid working time', 422);
+  return `${match[1]}:${match[2]}`;
+}
+
+function assertShift(start, end) {
+  if (start >= end) throw new AppError('Working time must end after it starts', 422);
+}
+
 async function listUsers(actor, query) {
   const { page, limit, skip } = paging(query);
   const filter = { deletedAt: null, ...staffScope(actor) };
@@ -77,6 +88,9 @@ async function createUser(actor, body, meta) {
     branch = branch || teamDoc.branch;
   }
   const permissions = await roleTemplate(body.role);
+  const workStart = workClock(body.workStart, '11:00');
+  const workEnd = workClock(body.workEnd, '20:00');
+  assertShift(workStart, workEnd);
   const user = await User.create({
     username,
     email,
@@ -96,6 +110,8 @@ async function createUser(actor, body, meta) {
     isActive: true,
     isDemo: false,
     maxLeadAllocation: body.maxLeadAllocation || 50,
+    workStart,
+    workEnd,
   });
   await recordAudit({
     user: actor._id, username: actor.username, action: 'user.create', module: 'users', recordId: user.id,
@@ -151,6 +167,13 @@ async function updateUser(actor, id, body, meta) {
   if (body.maxLeadAllocation != null) user.maxLeadAllocation = body.maxLeadAllocation;
   if (body.joiningDate) user.joiningDate = body.joiningDate;
   if (body.password) user.passwordHash = await bcrypt.hash(body.password, 10);
+  if (body.workStart || body.workEnd) {
+    const start = workClock(body.workStart, user.workStart || '11:00');
+    const end = workClock(body.workEnd, user.workEnd || '20:00');
+    assertShift(start, end);
+    user.workStart = start;
+    user.workEnd = end;
+  }
   await user.save();
   await recordAudit({
     user: actor._id, username: actor.username, action: 'user.update', module: 'users', recordId: user.id,

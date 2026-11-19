@@ -18,7 +18,7 @@ export default function UsersPage() {
   const [rows, setRows] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ role: 'STAFF', username: '', password: '' });
+  const [form, setForm] = useState({ role: 'STAFF', username: '', password: '', workStart: '11:00', workEnd: '20:00' });
 
   const creatable = [
     ['STAFF', 'Staff'],
@@ -38,10 +38,16 @@ export default function UsersPage() {
   const create = async (event) => {
     event.preventDefault();
     try {
-      await api.post('/api/v1/users', { username: form.username.trim(), password: form.password, role: form.role });
+      await api.post('/api/v1/users', {
+        username: form.username.trim(),
+        password: form.password,
+        role: form.role,
+        workStart: form.workStart,
+        workEnd: form.workEnd,
+      });
       toast('User created. They can sign in with this user ID and password.');
       setOpen(false);
-      setForm({ role: 'STAFF', username: '', password: '' });
+      setForm({ role: 'STAFF', username: '', password: '', workStart: '11:00', workEnd: '20:00' });
       load();
     } catch (error) { toast(messageFrom(error), 'error'); }
   };
@@ -49,7 +55,7 @@ export default function UsersPage() {
   const saveLogin = async (event) => {
     event.preventDefault();
     try {
-      const body = { username: form.username.trim() };
+      const body = { username: form.username.trim(), workStart: form.workStart, workEnd: form.workEnd };
       if (form.password) body.password = form.password;
       await api.patch(`/api/v1/users/${editing.id || editing._id}`, body);
       toast('Login updated');
@@ -72,7 +78,7 @@ export default function UsersPage() {
     <Page
       title="User Management"
       subtitle={user?.role === 'OWNER' ? 'Create logins and set the Super Admin user ID and password.' : 'Create logins for Admin, Team leader and Staff.'}
-      actions={<button className="btn" type="button" onClick={() => { setForm({ role: 'STAFF', username: '', password: '' }); setOpen(true); }}>Create user</button>}
+      actions={<button className="btn" type="button" onClick={() => { setForm({ role: 'STAFF', username: '', password: '', workStart: '11:00', workEnd: '20:00' }); setOpen(true); }}>Create user</button>}
     >
       <DataTable
         rows={rows}
@@ -80,10 +86,11 @@ export default function UsersPage() {
         columns={[
           { key: 'username', label: 'User ID' },
           { key: 'role', label: 'Role', render: (row) => ROLE_LABEL[row.role] || row.role },
+          { key: 'hours', label: 'Working time', render: (row) => row.workStart && row.workEnd ? `${row.workStart}–${row.workEnd}` : '—' },
           { key: 'status', label: 'Status', render: (row) => <Badge tone={row.isActive ? 'success' : 'danger'}>{row.isActive ? 'Active' : 'Inactive'}</Badge> },
           { key: 'action', label: '', render: (row) => canSetLogin(row) ? (
             <div className="actions">
-              <button className="btn secondary" type="button" onClick={() => { setEditing(row); setForm({ role: row.role, username: row.username, password: '' }); }}>Set login</button>
+              <button className="btn secondary" type="button" onClick={() => { setEditing(row); setForm({ role: row.role, username: row.username, password: '', workStart: row.workStart || '11:00', workEnd: row.workEnd || '20:00' }); }}>Set login</button>
               {row.isActive && <button className="btn secondary" type="button" onClick={() => deactivate(row)}>Deactivate</button>}
             </div>
           ) : null },
@@ -99,6 +106,8 @@ export default function UsersPage() {
             </Field>
             <Field label="User ID"><input aria-label="User ID" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} autoComplete="off" required /></Field>
             <Field label="Password" full><input aria-label="Password" type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete="new-password" minLength={7} required /></Field>
+            <Field label="Work starts"><input aria-label="Work starts" type="time" step="60" value={form.workStart} onChange={(event) => setForm({ ...form, workStart: event.target.value })} required /></Field>
+            <Field label="Work ends"><input aria-label="Work ends" type="time" step="60" value={form.workEnd} onChange={(event) => setForm({ ...form, workEnd: event.target.value })} required /></Field>
             <p className="full muted">This user ID and password are what they type on the sign-in screen.</p>
             <div className="full"><button className="btn" type="submit">Create user</button></div>
           </form>
@@ -109,6 +118,8 @@ export default function UsersPage() {
           <form className="form-grid" onSubmit={saveLogin}>
             <Field label="User ID"><input aria-label="User ID" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} required /></Field>
             <Field label="New password" full><input aria-label="New password" type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder="Leave blank to keep the current password" minLength={form.password ? 7 : undefined} /></Field>
+            <Field label="Work starts"><input aria-label="Work starts" type="time" step="60" value={form.workStart} onChange={(event) => setForm({ ...form, workStart: event.target.value })} required /></Field>
+            <Field label="Work ends"><input aria-label="Work ends" type="time" step="60" value={form.workEnd} onChange={(event) => setForm({ ...form, workEnd: event.target.value })} required /></Field>
             <div className="full"><button className="btn" type="submit">Save login</button></div>
           </form>
         </Modal>

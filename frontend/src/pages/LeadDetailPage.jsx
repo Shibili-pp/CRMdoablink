@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { MessageCircle, Phone } from 'lucide-react';
 import api from '../api/client';
-import { Field, Page, SkeletonRows, StatusBadge, LEAD_STATUS_COLORS, day, money } from '../components/ui';
+import { Field, Page, SkeletonRows, StatusBadge, LEAD_STATUS_COLORS, day, duration, money } from '../components/ui';
 import { messageFrom, useApp } from '../context/AppContext';
 
 export default function LeadDetailPage() {
@@ -21,6 +21,8 @@ export default function LeadDetailPage() {
   const [recordingFile, setRecordingFile] = useState(null);
   const [recordingConsent, setRecordingConsent] = useState(false);
   const [nextAction, setNextAction] = useState({ title: '', date: '', time: '' });
+  const [editingContact, setEditingContact] = useState(false);
+  const [contact, setContact] = useState({ name: '', phone: '' });
 
   const load = () => {
     Promise.all([
@@ -151,6 +153,21 @@ export default function LeadDetailPage() {
     } catch (error) { toast(messageFrom(error), 'error'); }
   };
 
+  const startEditContact = () => {
+    setContact({ name: lead.name || '', phone: lead.phone || '' });
+    setEditingContact(true);
+  };
+
+  const saveContact = async (event) => {
+    event.preventDefault();
+    try {
+      await api.patch(`/api/v1/leads/${id}`, { name: contact.name.trim(), phone: contact.phone.trim() });
+      toast('Name and mobile number updated');
+      setEditingContact(false);
+      load();
+    } catch (error) { toast(messageFrom(error), 'error'); }
+  };
+
   const statusLabel = statuses.find((item) => item.key === lead.status)?.label;
   const owners = people?.previousOwners || [];
 
@@ -162,6 +179,19 @@ export default function LeadDetailPage() {
           <span className="muted">{[lead.source, lead.district].filter(Boolean).join(' · ') || 'No source'}</span>
         </div>
         <p className="lead-phone">{lead.phoneDisplay || 'No phone'}</p>
+        {can('leads.edit') && !editingContact && (
+          <button className="btn secondary" type="button" onClick={startEditContact}>Edit name and number</button>
+        )}
+        {can('leads.edit') && editingContact && (
+          <form className="form-grid" onSubmit={saveContact}>
+            <Field label="Name"><input aria-label="Lead name" value={contact.name} onChange={(event) => setContact({ ...contact, name: event.target.value })} required minLength={2} /></Field>
+            <Field label="Mobile number"><input aria-label="Mobile number" value={contact.phone} onChange={(event) => setContact({ ...contact, phone: event.target.value })} required /></Field>
+            <div className="full actions">
+              <button className="btn" type="submit">Save</button>
+              <button className="btn secondary" type="button" onClick={() => setEditingContact(false)}>Cancel</button>
+            </div>
+          </form>
+        )}
         <p className="muted">On the phone, use the browser menu and choose Install app or Add to Home screen. Installing this website does not give Android call-log permission.</p>
         {lead.phoneNormalized && (
           <div className="lead-contact-actions">
@@ -251,7 +281,7 @@ export default function LeadDetailPage() {
         {calls.map((call) => (
           <article key={call._id}>
             <strong>{call.callType} · {call.status}</strong>
-            <div className="muted">{call.staff?.name || 'Employee'} · {new Date(call.startedAt).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} · {Math.round((call.durationSeconds || 0) / 60)} min · {call.dataSource}</div>
+            <div className="muted">{call.staff?.name || 'Employee'} · {new Date(call.startedAt).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} · {duration(call.durationSeconds)} · {call.dataSource}</div>
             {call.notes && <p>{call.notes}</p>}
           </article>
         ))}

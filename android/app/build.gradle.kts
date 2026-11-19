@@ -13,13 +13,13 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "com.doablink.orbit"
-    compileSdk = 34
+    compileSdk = 35
     defaultConfig {
         applicationId = "com.doablink.orbit"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.2.0"
+        versionCode = 5
+        versionName = "0.3.3"
     }
     signingConfigs {
         create("release") {
@@ -52,4 +52,6 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.documentfile:documentfile:1.0.1")
+    implementation("androidx.webkit:webkit:1.12.1")
+    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
 }

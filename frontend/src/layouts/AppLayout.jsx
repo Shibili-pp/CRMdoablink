@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import api, { getToken } from '../api/client';
 import { API_URL } from '../api/config';
+import HourlyLock from '../components/HourlyLock';
 import OverduePopup from '../components/OverduePopup';
 import { NAV } from '../constants/nav';
 import { useApp } from '../context/AppContext';
@@ -100,7 +101,7 @@ export default function AppLayout() {
           </button>
           <div className="search-wrap">
             <Search size={16} className="search-icon" aria-hidden="true" />
-            <input aria-label="Search lead name, phone or ID" value={query} placeholder="Search lead name, phone or ID" onChange={(event) => setQuery(event.target.value)} />
+            <input aria-label="Search lead name, phone or ID" value={query} placeholder="Search leads" onChange={(event) => setQuery(event.target.value)} />
             {!!hits.length && (
               <div className="search-hits card">
                 {hits.map((hit) => (
@@ -130,6 +131,7 @@ export default function AppLayout() {
           <Outlet />
         </div>
         <OverduePopup />
+        <HourlyLock />
       </div>
     </div>
   );

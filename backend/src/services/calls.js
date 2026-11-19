@@ -26,6 +26,27 @@ function presentCall(call) {
   };
 }
 
+async function attachAssignedLeads(rows) {
+  const phones = [...new Set(rows.map((row) => row.phoneNormalized).filter(Boolean))];
+  const staffIds = [...new Set(rows.map((row) => String(row.staff?._id || row.staff || '')).filter(Boolean))];
+  const leads = phones.length && staffIds.length
+    ? await Lead.find({
+      deletedAt: null,
+      assignedTo: { $in: staffIds },
+      $or: [{ phoneNormalized: { $in: phones } }, { alternatePhoneNormalized: { $in: phones } }],
+    }).select('leadCode name phoneNormalized alternatePhoneNormalized assignedTo').lean()
+    : [];
+  return rows.map((row) => {
+    const staffId = String(row.staff?._id || row.staff || '');
+    const phone = row.phoneNormalized;
+    const assigned = leads.find((lead) => String(lead.assignedTo) === staffId && (lead.phoneNormalized === phone || lead.alternatePhoneNormalized === phone));
+    return presentCall({
+      ...row,
+      assignedLead: assigned ? { id: assigned._id, leadCode: assigned.leadCode, name: assigned.name } : null,
+    });
+  });
+}
+
 async function registerDevice(user, body, meta) {
   if (!body.consentAccepted) throw new AppError('Device registration requires explicit consent', 422);
   const existing = await AndroidDevice.findOne({ deviceIdentifier: body.deviceIdentifier });
@@ -629,7 +650,7 @@ async function listCalls(user, query) {
       .lean(),
     CallLog.countDocuments(filter),
   ]);
-  return { data: rows.map(presentCall), meta: metaFor(page, limit, total) };
+  return { data: await attachAssignedLeads(rows), meta: metaFor(page, limit, total) };
 }
 
 async function summarizeCalls(match) {

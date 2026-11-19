@@ -59,6 +59,8 @@ const userSchema = new Schema({
   failedLoginCount: { type: Number, default: 0 },
   lockUntil: Date,
   lastLoginAt: Date,
+  workStart: { type: String, default: '' },
+  workEnd: { type: String, default: '' },
   deletedAt: { type: Date, default: null, index: true },
 }, { timestamps: true });
 
@@ -103,6 +105,8 @@ const leadSchema = new Schema({
   consultancyName: { type: String, default: '' },
   proposedPlan: { type: Number, default: 0 },
   remarks: { type: String, default: '' },
+  paymentAmount: { type: Number, default: 0 },
+  paymentState: { type: String, enum: ['', 'awaiting', 'received', 'returned'], default: '' },
   tags: { type: [String], default: [] },
   bucketStatus: { type: String, enum: ['unassigned', 'assigned'], default: 'unassigned', index: true },
   importBatch: { type: Schema.Types.ObjectId, ref: 'LeadImport' },
@@ -350,6 +354,29 @@ const hourlyManualSchema = new Schema({
 }, { timestamps: true });
 hourlyManualSchema.index({ staff: 1, dateKey: 1, fromTime: 1, toTime: 1 }, { unique: true });
 
+const hourlyCheckInSchema = new Schema({
+  staff: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  team: { type: Schema.Types.ObjectId, ref: 'Team', index: true },
+  branch: { type: Schema.Types.ObjectId, ref: 'Branch', index: true },
+  dateKey: { type: String, required: true, index: true },
+  hour: { type: Number, required: true },
+  fromLabel: String,
+  toLabel: String,
+  reportText: String,
+  sheet: Schema.Types.Mixed,
+  gaps: [{
+    key: String,
+    label: String,
+    actual: Number,
+    target: Number,
+    unit: String,
+  }],
+  reached: { type: Boolean, default: false },
+  reason: { type: String, default: '' },
+  submittedAt: { type: Date, default: Date.now },
+}, { timestamps: true });
+hourlyCheckInSchema.index({ staff: 1, dateKey: 1, hour: 1 }, { unique: true });
+
 const targetSchema = new Schema({
   name: { type: String, required: true },
   type: { type: String, required: true, index: true },
@@ -520,6 +547,7 @@ module.exports = {
   SyncBatch: model('SyncBatch', syncBatchSchema),
   HourlyReport: model('HourlyReport', hourlyReportSchema),
   HourlyManual: model('HourlyManual', hourlyManualSchema),
+  HourlyCheckIn: model('HourlyCheckIn', hourlyCheckInSchema),
   Target: model('Target', targetSchema),
   RevenueOpportunity: model('RevenueOpportunity', opportunitySchema),
   Payment: model('Payment', paymentSchema),

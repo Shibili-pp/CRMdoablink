@@ -1,15 +1,18 @@
 const ExcelJS = require('exceljs');
-const { HourlyReport, HourlyManual, CallLog, FollowUp, Lead, LeadActivity, Payment, User } = require('../models');
+const { HourlyReport, HourlyManual, HourlyCheckIn, CallLog, FollowUp, Lead, LeadActivity, Payment, User } = require('../models');
 const { AppError, metaFor } = require('../utils/http');
 const { localHourRange, dateKeyFromDate, zonedParts, viewRange, combineLocal } = require('../utils/time');
 const { getGeneral } = require('./settings');
 const { recordAudit } = require('./audit');
 const { summarizeCalls } = require('./calls');
 const { recordScope, isElevated, staffScope } = require('./access');
+const { workingTarget } = require('./targets');
 const { COMPANY, WON_STATUSES, POSITIVE_STATUSES } = require('../config/constants');
 
 const SHEET_COLUMNS = [
   ['totalCalls', 'Total Calls'],
+  ['incomingCalls', 'Incoming'],
+  ['outgoingCalls', 'Outgoing'],
   ['connectedCalls', 'Connected Calls'],
   ['prospective', 'Prospective'],
   ['demoBooked', 'Demo Booked'],
@@ -27,6 +30,8 @@ const SHEET_COLUMNS = [
 function emptySheet() {
   return {
     totalCalls: 0,
+    incomingCalls: 0,
+    outgoingCalls: 0,
     connectedCalls: 0,
     prospective: 0,
     demoBooked: 0,
@@ -141,13 +146,14 @@ async function sheetFor(staff, start, end) {
   const sheet = emptySheet();
   const [callRows, followups, payments, leadIds] = await Promise.all([
     CallLog.aggregate([
-      { $match: { staff: staffId, startedAt: { $gte: start, $lt: end }, callType: 'outgoing' } },
+      { $match: { staff: staffId, startedAt: { $gte: start, $lt: end } } },
       { $group: {
         _id: null,
-        totalCalls: { $sum: 1 },
-        connectedCalls: { $sum: { $cond: [{ $eq: ['$status', 'connected'] }, 1, 0] } },
-        dnp: { $sum: { $cond: [{ $ne: ['$status', 'connected'] }, 1, 0] } },
-        totalCallDuration: { $sum: '$durationSeconds' },
+        outgoingCalls: { $sum: { $cond: [{ $eq: ['$callType', 'outgoing'] }, 1, 0] } },
+        incomingCalls: { $sum: { $cond: [{ $in: ['$callType', ['incoming', 'missed']] }, 1, 0] } },
+        connectedCalls: { $sum: { $cond: [{ $and: [{ $eq: ['$callType', 'outgoing'] }, { $eq: ['$status', 'connected'] }] }, 1, 0] } },
+        dnp: { $sum: { $cond: [{ $and: [{ $eq: ['$callType', 'outgoing'] }, { $ne: ['$status', 'connected'] }] }, 1, 0] } },
+        totalCallDuration: { $sum: { $cond: [{ $eq: ['$callType', 'outgoing'] }, '$durationSeconds', 0] } },
       } },
     ]),
     FollowUp.countDocuments({ assignedTo: staffId, status: 'completed', completedAt: { $gte: start, $lt: end } }),
@@ -158,16 +164,18 @@ async function sheetFor(staff, start, end) {
     Lead.find({ assignedTo: staffId, deletedAt: null }).distinct('_id'),
   ]);
   const calls = callRows[0] || {};
-  sheet.totalCalls = calls.totalCalls || 0;
+  sheet.incomingCalls = calls.incomingCalls || 0;
+  sheet.outgoingCalls = calls.outgoingCalls || 0;
+  sheet.totalCalls = sheet.incomingCalls + sheet.outgoingCalls;
   sheet.connectedCalls = calls.connectedCalls || 0;
   sheet.dnp = calls.dnp || 0;
   sheet.totalCallDuration = calls.totalCallDuration || 0;
   sheet.followups = followups;
   sheet.paymentCollected = payments[0]?.amount || 0;
+  sheet.prospective = await countDistinct({ actor: staffId, at: { $gte: start, $lt: end }, type: 'pipeline_added' });
   if (!leadIds.length) return sheet;
   const inHour = { lead: { $in: leadIds }, at: { $gte: start, $lt: end } };
-  const [prospective, demoBooked, demoCompleted, interestedToBuy, notInterested, subscriptionClosed, rescheduled] = await Promise.all([
-    countDistinct({ ...inHour, type: 'status_changed', newValue: 'positive' }),
+  const [demoBooked, demoCompleted, interestedToBuy, notInterested, subscriptionClosed, rescheduled] = await Promise.all([
     countDistinct({ ...inHour, type: 'status_changed', newValue: 'demo_booked' }),
     countDistinct({ ...inHour, type: 'status_changed', newValue: 'demo_completed' }),
     countDistinct({ ...inHour, type: 'status_changed', newValue: 'interested' }),
@@ -181,7 +189,6 @@ async function sheetFor(staff, start, end) {
       ],
     }),
   ]);
-  sheet.prospective = prospective;
   sheet.demoBooked = demoBooked;
   sheet.demoCompleted = demoCompleted;
   sheet.interestedToBuy = interestedToBuy;
@@ -364,7 +371,12 @@ async function personInScope(user, staffId) {
   return people.find((person) => String(person._id) === String(staffId));
 }
 
+function assertCanEdit(user) {
+  if (user.role === 'STAFF') throw new AppError('Staff cannot edit hourly numbers', 403);
+}
+
 async function saveManual(user, body, meta) {
+  assertCanEdit(user);
   const person = await personInScope(user, body.staffId);
   if (!person) throw new AppError('That person is outside your report', 403);
   const general = await getGeneral();
@@ -394,6 +406,7 @@ async function saveManual(user, body, meta) {
 }
 
 async function clearManual(user, body, meta) {
+  assertCanEdit(user);
   const person = await personInScope(user, body.staffId);
   if (!person) throw new AppError('That person is outside your report', 403);
   const general = await getGeneral();
@@ -511,6 +524,207 @@ async function assertHourlySums(staffId, dateKey) {
   return { summed, actual, matches: summed === actual };
 }
 
+function minutesOf(value) {
+  const match = String(value || '').match(/^(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function shiftHoursOf(start, end) {
+  const span = minutesOf(end) - minutesOf(start);
+  const wallHours = span > 0 ? span / 60 : 1;
+  // Wall clock includes a 1-hour lunch break; hourly KPI uses the productive hours only.
+  return Math.max(1, wallHours - 1);
+}
+
+function completedWorkHours(start, end, parts) {
+  const startMin = minutesOf(start);
+  const endMin = minutesOf(end);
+  const nowMin = parts.hour * 60 + parts.minute;
+  if (startMin == null || endMin == null || endMin <= startMin) return [];
+  const hours = [];
+  for (let hour = 0; hour < 24; hour += 1) {
+    const open = hour * 60;
+    const close = open + 60;
+    if (open >= startMin && close <= endMin && close <= nowMin) hours.push(hour);
+  }
+  return hours;
+}
+
+function countLabel(value) {
+  const rounded = Math.round(Number(value) * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+async function uniqueOutgoing(staffId, start, end) {
+  const rows = await CallLog.aggregate([
+    { $match: { staff: staffId, callType: 'outgoing', startedAt: { $gte: start, $lt: end }, phoneNormalized: { $nin: [null, ''] } } },
+    { $group: { _id: '$phoneNormalized' } },
+    { $count: 'count' },
+  ]);
+  return rows[0]?.count || 0;
+}
+
+async function staffShift(user) {
+  let start = user.workStart;
+  let end = user.workEnd;
+  const missingStart = minutesOf(start) == null;
+  const missingEnd = minutesOf(end) == null;
+  if (user.role === 'STAFF' && (missingStart || missingEnd)) {
+    start = missingStart ? '11:00' : start;
+    end = missingEnd ? '20:00' : end;
+    await User.updateOne({ _id: user._id }, { $set: { workStart: start, workEnd: end } });
+  }
+  if (minutesOf(start) == null) start = '11:00';
+  if (minutesOf(end) == null) end = '20:00';
+  return { start, end };
+}
+
+function metricActual(metric, sheet, unique) {
+  if (metric.key === 'uniqueProspects') return unique;
+  if (metric.unit === 'minutes') return Number(sheet.totalCallDuration) || 0;
+  return Number(sheet[metric.sheet]) || 0;
+}
+
+function metricTarget(metric, hours) {
+  if (metric.unit === 'minutes') return (metric.daily / hours) * 60;
+  return metric.daily / hours;
+}
+
+function metricLabels(metric, actual, target) {
+  if (metric.unit === 'minutes') {
+    return { actualLabel: formatDuration(actual), targetLabel: formatDuration(target) };
+  }
+  return {
+    actualLabel: countLabel(actual),
+    targetLabel: String(Math.max(0, Math.round(Number(target) || 0))),
+  };
+}
+
+async function buildHourCheck(user, dateKey, hour, timezone) {
+  const standard = await workingTarget();
+  const { start, end } = localHourRange(dateKey, hour, timezone);
+  const person = await User.findById(user._id).select('name team branch workStart workEnd role');
+  const shift = await staffShift(person || user);
+  const hours = shiftHoursOf(shift.start, shift.end);
+  const [computed, manual, unique] = await Promise.all([
+    sheetFor(person || user, start, end),
+    HourlyManual.findOne({
+      staff: user._id,
+      dateKey,
+      fromTime: `${String(hour).padStart(2, '0')}:00`,
+      toTime: `${String(hour).padStart(2, '0')}:59`,
+    }).lean(),
+    uniqueOutgoing(user._id, start, end),
+  ]);
+  const sheet = applyManual(computed, manual);
+  const checks = standard.metrics.map((metric) => {
+    const actual = metricActual(metric, sheet, unique);
+    const target = metricTarget(metric, hours);
+    const labels = metricLabels(metric, actual, target);
+    return {
+      key: metric.key,
+      label: metric.label,
+      unit: metric.unit,
+      actual,
+      target,
+      short: metric.unit === 'minutes'
+        ? Math.round(actual / 60) < Math.round(target / 60)
+        : actual < Math.round(target),
+      ...labels,
+    };
+  });
+  const gaps = checks.filter((row) => row.short).map((row) => ({
+    key: row.key, label: row.label, actual: row.actual, target: row.target, unit: row.unit,
+  }));
+  const fromLabel = String(hour);
+  const toLabel = String((hour + 1) % 24);
+  return {
+    dateKey,
+    hour,
+    fromLabel,
+    toLabel,
+    label: `${fromLabel}–${toLabel}`,
+    workStart: shift.start,
+    workEnd: shift.end,
+    shiftHours: hours,
+    reportText: whatsappText({ name: (person || user).name, dateKey, hour, sheet }),
+    checks,
+    gaps,
+    reached: gaps.length === 0,
+  };
+}
+
+async function dueCheckIn(user) {
+  if (user.role !== 'STAFF') return { data: null };
+  const general = await getGeneral();
+  const now = new Date();
+  const dateKey = dateKeyFromDate(now, general.timezone);
+  const shift = await staffShift(user);
+  const finished = completedWorkHours(shift.start, shift.end, zonedParts(now, general.timezone));
+  if (!finished.length) return { data: null };
+  const done = await HourlyCheckIn.find({ staff: user._id, dateKey, hour: { $in: finished } }).select('hour').lean();
+  const doneHours = new Set(done.map((row) => row.hour));
+  const waiting = finished.filter((hour) => !doneHours.has(hour));
+  if (!waiting.length) return { data: null };
+  const current = await buildHourCheck(user, dateKey, waiting[0], general.timezone);
+  return { data: { ...current, pending: waiting.length } };
+}
+
+async function submitCheckIn(user, body) {
+  if (user.role !== 'STAFF') throw new AppError('Only staff submit the hourly report', 403);
+  const due = await dueCheckIn(user);
+  if (!due.data) throw new AppError('No hourly report is waiting', 404);
+  if (due.data.dateKey !== body.dateKey || due.data.hour !== Number(body.hour)) {
+    throw new AppError('Submit the hour that is waiting', 422);
+  }
+  const reason = String(body.reason || '').trim();
+  if (!due.data.reached && reason.length < 3) throw new AppError('Enter why the target was not reached', 422);
+  try {
+    await HourlyCheckIn.create({
+      staff: user._id,
+      team: user.team || null,
+      branch: user.branch || null,
+      dateKey: due.data.dateKey,
+      hour: due.data.hour,
+      fromLabel: due.data.fromLabel,
+      toLabel: due.data.toLabel,
+      reportText: due.data.reportText,
+      sheet: {},
+      gaps: due.data.gaps,
+      reached: due.data.reached,
+      reason: due.data.reached ? '' : reason,
+      submittedAt: new Date(),
+    });
+  } catch (error) {
+    if (error?.code !== 11000) throw error;
+  }
+  return { data: { submitted: true }, message: 'Hourly report submitted' };
+}
+
+async function listCheckIns(user, query) {
+  const general = await getGeneral();
+  const dateKey = query.date || dateKeyFromDate(new Date(), general.timezone);
+  const filter = { dateKey, ...recordScope(user, { staff: 'staff' }) };
+  const rows = await HourlyCheckIn.find(filter).sort({ hour: 1 }).populate('staff', 'name role').lean();
+  return {
+    data: rows.map((row) => ({
+      id: String(row._id),
+      staffId: row.staff?._id ? String(row.staff._id) : String(row.staff),
+      staffName: row.staff?.name || 'Staff',
+      dateKey: row.dateKey,
+      hour: row.hour,
+      label: `${row.fromLabel}–${row.toLabel}`,
+      reportText: row.reportText || '',
+      gaps: row.gaps || [],
+      reached: row.reached,
+      reason: row.reason || '',
+      submittedAt: row.submittedAt,
+    })),
+  };
+}
+
 module.exports = {
   list, generate, whatsapp, day, windowReport, exportReport, saveManual, clearManual, generateForStaff, generateElapsed, whatsappText, assertHourlySums, SHEET_COLUMNS,
+  dueCheckIn, submitCheckIn, listCheckIns,
 };

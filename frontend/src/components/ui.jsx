@@ -2,15 +2,15 @@ import { useEffect, useMemo, useState } from 'react';
 
 export function Page({ title, subtitle, actions, children }) {
   return (
-    <section>
+    <section className="page-shell">
       <header className="page-head">
-        <div>
+        <div className="page-copy">
           <h1>{title}</h1>
           {subtitle && <p>{subtitle}</p>}
         </div>
-        <div className="actions">{actions}</div>
+        {actions ? <div className="actions page-actions">{actions}</div> : null}
       </header>
-      {children}
+      <div className="page-body">{children}</div>
     </section>
   );
 }
@@ -77,8 +77,11 @@ export function Modal({ title, onClose, children }) {
   return (
     <div className="modal-back" onClick={onClose}>
       <div className="modal" onClick={(event) => event.stopPropagation()}>
-        <div className="page-head"><h2>{title}</h2><button className="btn ghost" type="button" onClick={onClose}>Close</button></div>
-        {children}
+        <div className="modal-head">
+          <h2>{title}</h2>
+          <button className="btn ghost" type="button" onClick={onClose}>Close</button>
+        </div>
+        <div className="modal-body">{children}</div>
       </div>
     </div>
   );
@@ -117,12 +120,12 @@ export function SearchableSelect({ label, value, onChange, options, placeholder 
   );
 }
 
-export function DataTable({ columns, rows, loading, empty, onRow, page, pages, onPage, className = '' }) {
+export function DataTable({ columns, rows, loading, empty, onRow, rowClass, page, pages, onPage, className = '' }) {
   if (loading) return <SkeletonRows />;
   if (!rows?.length) return <Empty title={empty || 'Nothing here yet'} message="Try another filter or add a record." />;
   const cellClass = (column) => [column.hide ? 'col-hide' : '', column.hideOnMobile ? 'mobile-hide' : '', column.cellClass || ''].filter(Boolean).join(' ');
   return (
-    <div className={`card ${className}`.trim()}>
+    <div className={`card table-card ${className}`.trim()}>
       <div className="table-wrap">
         <table>
           <thead>
@@ -130,7 +133,7 @@ export function DataTable({ columns, rows, loading, empty, onRow, page, pages, o
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.id || row._id} className={onRow ? 'clickable' : ''} onClick={() => onRow && onRow(row)}>
+              <tr key={row.id || row._id} className={[onRow ? 'clickable' : '', rowClass?.(row)].filter(Boolean).join(' ')} onClick={() => onRow && onRow(row)}>
                 {columns.map((column) => (
                   <td key={column.key} data-label={column.label} className={cellClass(column)}>
                     <span className="cell-value">{column.render ? column.render(row) : row[column.key]}</span>
@@ -181,8 +184,11 @@ export function money(value) {
 }
 
 export function duration(seconds) {
-  const minutes = Math.round((Number(seconds) || 0) / 60);
-  return `${Math.max(0, minutes)} min`;
+  const minutes = Math.max(0, Math.round((Number(seconds) || 0) / 60));
+  if (minutes <= 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = String(minutes % 60).padStart(2, '0');
+  return `${hours}.${rest} hr`;
 }
 
 export function formatValue(card) {

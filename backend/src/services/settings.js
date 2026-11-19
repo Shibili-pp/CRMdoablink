@@ -3,7 +3,7 @@ const {
 } = require('../models');
 const { recordAudit } = require('./audit');
 const {
-  LEAD_ROLES, LEAD_SOURCES, ORIGINAL_LEAD_SOURCES, LEAD_STATUSES, PIPELINE_STAGES, ALERT_RULES, LEADERBOARD_WEIGHTS, COMPANY,
+  LEAD_ROLES, LEAD_SOURCES, ORIGINAL_LEAD_SOURCES, LEAD_STATUSES, PIPELINE_STAGES, ALERT_RULES, LEADERBOARD_WEIGHTS, COMPANY, BDA_WORKING_TARGET,
 } = require('../config/constants');
 const { ALL_PERMISSIONS, ROLE_PERMISSIONS } = require('../config/permissions');
 const { AppError } = require('../utils/http');
@@ -271,6 +271,22 @@ async function ensureReferenceData() {
     { $setOnInsert: rule },
     { upsert: true }
   )));
+  if (!await SystemSetting.findOne({ key: 'bdaWorkingTarget' })) {
+    await SystemSetting.create({ key: 'bdaWorkingTarget', value: BDA_WORKING_TARGET });
+  }
+  await User.updateMany(
+    {
+      role: { $in: ['STAFF', 'TEAM_LEADER'] },
+      deletedAt: null,
+      $or: [
+        { workStart: { $in: [null, ''] } },
+        { workStart: { $exists: false } },
+        { workEnd: { $in: [null, ''] } },
+        { workEnd: { $exists: false } },
+      ],
+    },
+    { $set: { workStart: '11:00', workEnd: '20:00' } }
+  );
   clearSettingsCache();
 }
 
@@ -376,7 +392,9 @@ module.exports = {
   ensureReferenceData,
   activeStatuses,
   activeStages,
+  listStatuses,
   saveStatus,
+  removeStatus,
   saveStage,
   updateAlertRule,
 };

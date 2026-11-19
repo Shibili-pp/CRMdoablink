@@ -10,8 +10,9 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import com.doablink.orbit.auth.LoginActivity
 import com.doablink.orbit.dial.DialActivity
+import com.doablink.orbit.shell.AppActivity
+import com.doablink.orbit.shell.PhoneLink
 import com.doablink.orbit.workers.OrbitSync
 
 class HomeActivity : AppCompatActivity() {
@@ -29,10 +30,17 @@ class HomeActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        PhoneLink.ensureApi(this)
         status = TextView(this)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 72, 48, 48)
+            addView(Button(this@HomeActivity).apply {
+                text = "Open the CRM"
+                setOnClickListener {
+                    startActivity(Intent(this@HomeActivity, AppActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
+                }
+            })
             addView(TextView(this@HomeActivity).apply {
                 text = "Call sync is on"
                 textSize = 24f
@@ -104,7 +112,7 @@ class HomeActivity : AppCompatActivity() {
 
     private fun signOut() {
         OrbitSync.stop(this)
-        getSharedPreferences("orbit", MODE_PRIVATE).edit().remove("deviceToken").apply()
-        startActivity(Intent(this, LoginActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        getSharedPreferences("orbit", MODE_PRIVATE).edit().remove("deviceToken").remove("linkedSub").apply()
+        startActivity(Intent(this, AppActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
     }
 }

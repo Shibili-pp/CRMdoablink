@@ -190,6 +190,9 @@ router.post('/android/devices/:id/contacts-sync', requirePermission('contacts.sy
 router.get('/android/sync-status', requirePermission('calls.sync'), action((req) => calls.syncStatus(req.user)));
 router.get('/android/sync-history', requireAny('calls.view', 'calls.sync'), q, action((req) => calls.syncHistory(req.user, req.query)));
 
+router.get('/hourly-reports/check-in', requirePermission('hourly.view'), action((req) => hourly.dueCheckIn(req.user)));
+router.post('/hourly-reports/check-in', requirePermission('hourly.view'), validate({ body: schemas.hourlyCheckIn }), action((req) => hourly.submitCheckIn(req.user, req.body)));
+router.get('/hourly-reports/check-ins', requirePermission('hourly.view'), q, action((req) => hourly.listCheckIns(req.user, req.query)));
 router.get('/hourly-reports/window', requirePermission('hourly.view'), q, action((req) => hourly.windowReport(req.user, req.query)));
 router.get('/hourly-reports/whatsapp', requirePermission('hourly.view'), q, action((req) => hourly.whatsapp(req.user, req.query)));
 router.get('/hourly-reports/day', requirePermission('hourly.view'), q, action((req) => hourly.day(req.user, req.query)));
@@ -199,6 +202,8 @@ router.post('/hourly-reports/generate', requirePermission('hourly.view'), valida
 router.post('/hourly-reports/manual', requirePermission('hourly.view'), validate({ body: schemas.hourlyManual }), action((req, meta) => hourly.saveManual(req.user, req.body, meta)));
 router.delete('/hourly-reports/manual', requirePermission('hourly.view'), validate({ body: schemas.hourlyManualKey }), action((req, meta) => hourly.clearManual(req.user, req.body, meta)));
 
+router.get('/working-targets', requirePermission('targets.view'), action(() => targets.getWorkingTarget()));
+router.put('/working-targets', requirePermission('targets.manage'), validate({ body: schemas.workingTarget }), action((req, meta) => targets.saveWorkingTarget(req.user, req.body, meta)));
 router.get('/targets', requirePermission('targets.view'), q, action((req) => targets.list(req.user, req.query)));
 router.post('/targets', requirePermission('targets.manage'), validate({ body: schemas.target }), action((req, meta) => targets.create(req.user, req.body, meta)));
 router.get('/targets/:id', requirePermission('targets.view'), id, action((req) => targets.getOne(req.user, req.params.id)));

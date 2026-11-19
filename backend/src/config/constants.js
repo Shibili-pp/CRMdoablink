@@ -154,6 +154,18 @@ const COMPANY = {
   productName: 'DoablinkOrbit',
 };
 
+const BDA_WORKING_TARGET = {
+  workingDays: 25,
+  metrics: [
+    { key: 'dialAttempts', label: 'Dial attempts', daily: 120, unit: 'count', sheet: 'outgoingCalls' },
+    { key: 'uniqueProspects', label: 'Unique prospects contacted', daily: 75, unit: 'count', sheet: 'uniqueContacts' },
+    { key: 'connectedCalls', label: 'Connected calls', daily: 60, unit: 'count', sheet: 'connectedCalls' },
+    { key: 'talkTime', label: 'Talk time', daily: 180, unit: 'minutes', sheet: 'totalCallDuration' },
+    { key: 'demosBooked', label: 'Demos booked', daily: 10, unit: 'count', sheet: 'demoBooked' },
+    { key: 'demosConducted', label: 'Demos conducted', daily: 5, unit: 'count', sheet: 'demoCompleted' },
+  ],
+};
+
 module.exports = {
   ROLES,
   ROLE_RANK,
@@ -177,4 +189,5 @@ module.exports = {
   CALL_STATUSES,
   DATA_SOURCES,
   COMPANY,
+  BDA_WORKING_TARGET,
 };

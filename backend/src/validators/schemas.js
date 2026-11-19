@@ -34,6 +34,7 @@ const query = Joi.object({
   matchStatus: Joi.string().max(30).allow(''),
   bucket: Joi.string().valid('assigned', 'unassigned', 'today', 'upcoming', 'overdue', 'missed', ''),
   view: Joi.string().max(30).allow(''),
+  touch: Joi.string().valid('untouched', 'worked', ''),
   format: Joi.string().valid('pdf', 'xlsx', 'csv'),
   period: Joi.string().valid('daily', 'weekly', 'monthly'),
   preset: Joi.string().valid('today', 'yesterday', 'week', 'month', 'last7', 'last30', ''),
@@ -103,6 +104,8 @@ const pipelinePatch = Joi.object({
   consultancyName: Joi.string().max(160).allow(''),
   proposedPlan: Joi.number().min(0),
   remarks: Joi.string().max(4000).allow(''),
+  paymentAmount: Joi.number().min(0),
+  paymentAction: Joi.string().valid('submit', 'approve', 'return'),
 });
 
 module.exports = {
@@ -127,6 +130,8 @@ module.exports = {
     manager: objectId.allow(null, ''),
     joiningDate: date,
     maxLeadAllocation: Joi.number().integer().min(1).max(500),
+    workStart: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
+    workEnd: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
   }),
   userPatch: Joi.object({
     name: Joi.string().trim().min(2).max(120),
@@ -143,6 +148,8 @@ module.exports = {
     maxLeadAllocation: Joi.number().integer().min(1).max(500),
     joiningDate: date,
     password: Joi.string().min(7).max(72),
+    workStart: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
+    workEnd: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
   }),
   permissions: Joi.object({ permissions: Joi.array().items(Joi.string()).required() }),
   branch: Joi.object({
@@ -310,6 +317,18 @@ module.exports = {
     status: Joi.string().valid('completed', 'failed', 'cancelled').required(),
     reason: Joi.string().max(300).allow(''),
   }),
+  hourlyCheckIn: Joi.object({
+    dateKey: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required(),
+    hour: Joi.number().integer().min(0).max(23).required(),
+    reason: Joi.string().max(2000).allow(''),
+  }),
+  workingTarget: Joi.object({
+    workingDays: Joi.number().integer().min(1).max(31).required(),
+    metrics: Joi.array().items(Joi.object({
+      key: Joi.string().valid('dialAttempts', 'uniqueProspects', 'connectedCalls', 'talkTime', 'demosBooked', 'demosConducted').required(),
+      daily: Joi.number().min(0).max(1000000).required(),
+    })).length(6).required(),
+  }),
   hourlyGenerate: Joi.object({
     date: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/),
     hour: Joi.number().integer().min(0).max(23),
@@ -328,6 +347,8 @@ module.exports = {
     toTime: Joi.string().pattern(/^\d{2}:\d{2}$/).required(),
     values: Joi.object({
       totalCalls: Joi.number().min(0).max(100000),
+      incomingCalls: Joi.number().min(0).max(100000),
+      outgoingCalls: Joi.number().min(0).max(100000),
       connectedCalls: Joi.number().min(0).max(100000),
       prospective: Joi.number().min(0).max(100000),
       demoBooked: Joi.number().min(0).max(100000),

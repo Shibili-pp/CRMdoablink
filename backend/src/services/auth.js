@@ -39,6 +39,8 @@ function publicUser(user) {
     isDemo: Boolean(user.isDemo),
     maxLeadAllocation: user.maxLeadAllocation,
     lastLoginAt: user.lastLoginAt,
+    workStart: user.workStart || '',
+    workEnd: user.workEnd || '',
   };
 }
 

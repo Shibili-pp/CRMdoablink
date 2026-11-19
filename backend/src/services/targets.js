@@ -1,11 +1,11 @@
-const { Target } = require('../models');
+const { Target, SystemSetting } = require('../models');
 const { AppError, paging, metaFor } = require('../utils/http');
 const { periodRange, remainingDays } = require('../utils/time');
 const { getGeneral } = require('./settings');
 const { measureTarget } = require('./metrics');
 const { recordAudit, changed } = require('./audit');
 const { isElevated } = require('./access');
-const { TARGET_TYPES } = require('../config/constants');
+const { TARGET_TYPES, BDA_WORKING_TARGET } = require('../config/constants');
 
 function typeInfo(key) {
   return TARGET_TYPES.find((item) => item.key === key) || { label: key, group: 'kpi', unit: 'count' };
@@ -118,4 +118,43 @@ async function getOne(user, id) {
   return { data: await withProgress(target) };
 }
 
-module.exports = { list, create, update, getOne, withProgress };
+async function workingTarget() {
+  const doc = await SystemSetting.findOne({ key: 'bdaWorkingTarget' }).lean();
+  const stored = doc?.value || {};
+  const workingDays = Math.min(31, Math.max(1, Number(stored.workingDays) || BDA_WORKING_TARGET.workingDays));
+  const metrics = BDA_WORKING_TARGET.metrics.map((item) => {
+    const found = (stored.metrics || []).find((row) => row.key === item.key);
+    const daily = Number.isFinite(Number(found?.daily)) ? Number(found.daily) : item.daily;
+    return {
+      ...item,
+      daily,
+      monthly: Math.round(daily * workingDays * 100) / 100,
+    };
+  });
+  return { workingDays, metrics };
+}
+
+async function getWorkingTarget() {
+  return { data: await workingTarget() };
+}
+
+async function saveWorkingTarget(user, body, meta) {
+  const workingDays = body.workingDays;
+  const metrics = BDA_WORKING_TARGET.metrics.map((item) => {
+    const found = body.metrics.find((row) => row.key === item.key);
+    return { ...item, daily: found.daily };
+  });
+  const value = { workingDays, metrics };
+  await SystemSetting.findOneAndUpdate(
+    { key: 'bdaWorkingTarget' },
+    { key: 'bdaWorkingTarget', value, updatedBy: user._id },
+    { upsert: true, new: true }
+  );
+  await recordAudit({
+    user: user._id, username: user.username, action: 'target.working', module: 'targets', recordId: 'bdaWorkingTarget',
+    newValues: value, ...meta,
+  });
+  return { data: await workingTarget(), message: 'Working target saved' };
+}
+
+module.exports = { list, create, update, getOne, withProgress, getWorkingTarget, saveWorkingTarget, workingTarget };

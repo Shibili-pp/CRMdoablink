@@ -15,7 +15,7 @@ const { LOST_STATUSES } = require('../config/constants');
 const { dateKeyOf, dayBounds } = require('../utils/time');
 
 const LEAD_SORT = ['createdAt', 'name', 'expectedRevenue', 'status', 'priority', 'followUpAt', 'leadCode', 'lastContactedAt', 'assignmentDate'];
-const STAFF_FIELDS = ['status', 'nextActionTitle', 'nextActionDueAt', 'notes', 'lostReason', 'tags', 'followUpAt', 'priority', 'quality', 'leadRole'];
+const STAFF_FIELDS = ['name', 'phone', 'status', 'nextActionTitle', 'nextActionDueAt', 'notes', 'lostReason', 'tags', 'followUpAt', 'priority', 'quality', 'leadRole'];
 
 async function nextLeadCode() {
   await Counter.updateOne({ _id: 'lead' }, { $setOnInsert: { seq: 10000 } }, { upsert: true });
@@ -59,6 +59,7 @@ async function buildLeadFilter(user, query, { bucket = false } = {}) {
   if (clean(query.branch) && isElevated(user)) filter.branch = query.branch;
   if (query.bucket === 'unassigned') filter.assignedTo = null;
   if (query.bucket === 'assigned') filter.assignedTo = { $ne: null };
+  if (!bucket && query.bucket !== 'unassigned' && !clean(query.staff)) filter.assignedTo = { $ne: null };
   if (query.assignedFrom || query.assignedTo) {
     const fromKey = dateKeyOf(query.assignedFrom, 'Asia/Kolkata');
     const toKey = dateKeyOf(query.assignedTo, 'Asia/Kolkata');
@@ -84,11 +85,39 @@ async function buildLeadFilter(user, query, { bucket = false } = {}) {
   return combine(filter, scope);
 }
 
+const STATUS_TOUCH_TYPES = ['status_changed', 'demo_completed', 'onboarding_completed'];
+
+async function untouchedLeadIds(filter) {
+  const leads = await Lead.find(filter).select('_id assignedTo assignmentDate createdAt').lean();
+  const assigned = leads.filter((lead) => lead.assignedTo);
+  if (!assigned.length) return [];
+  const activities = await LeadActivity.find({
+    lead: { $in: assigned.map((lead) => lead._id) },
+    type: { $in: STATUS_TOUCH_TYPES },
+  }).select('lead actor at').lean();
+  const byLead = new Map(assigned.map((lead) => [String(lead._id), lead]));
+  const touched = new Set();
+  activities.forEach((activity) => {
+    const lead = byLead.get(String(activity.lead));
+    if (!lead || String(activity.actor) !== String(lead.assignedTo)) return;
+    const since = new Date(lead.assignmentDate || lead.createdAt || 0).getTime();
+    if (new Date(activity.at).getTime() >= since) touched.add(String(lead._id));
+  });
+  return assigned.filter((lead) => !touched.has(String(lead._id))).map((lead) => lead._id);
+}
+
 async function list(user, query) {
   const bucket = query.view === 'bucket';
   const { page, limit, skip } = paging(query);
   const filter = await buildLeadFilter(user, query, { bucket });
-  const sort = sortFrom(query, LEAD_SORT);
+  const sort = query.sort
+    ? sortFrom(query, LEAD_SORT)
+    : { assignmentDate: -1, createdAt: -1 };
+  if (!bucket && (query.touch === 'untouched' || query.touch === 'worked')) {
+    const ids = await untouchedLeadIds(filter);
+    if (query.touch === 'untouched') filter._id = { $in: ids };
+    else if (ids.length) filter._id = { $nin: ids };
+  }
   const [rows, total] = await Promise.all([
     Lead.find(filter)
       .sort(sort)
@@ -304,6 +333,14 @@ async function update(user, id, body, meta) {
     await notify({
       user: patch.assignedTo, type: 'lead_assigned', title: 'Lead reassigned to you',
       body: `${lead.name} (${lead.leadCode})`, module: 'leads', recordId: lead.id,
+    });
+  }
+  if (diff.oldValues.name !== undefined || diff.oldValues.phone !== undefined) {
+    await addActivity({
+      lead, type: 'lead_updated', actor: user,
+      description: 'Name or mobile number updated',
+      oldValue: { name: diff.oldValues.name, phone: diff.oldValues.phone },
+      newValue: { name: lead.name, phone: lead.phone },
     });
   }
   if (patch.expectedRevenue != null && diff.changed) {
@@ -762,7 +799,59 @@ async function addToPipeline(user, id, meta) {
   return { data: presentLead(lead.toObject()), message: 'Added to pipeline' };
 }
 
+function canConfirmPayment(user) {
+  return user.role !== 'STAFF';
+}
+
 async function updatePipeline(user, id, body, meta) {
+  const approver = canConfirmPayment(user);
+  if (body.paymentAction === 'submit') {
+    const amount = Math.max(0, Number(body.paymentAmount) || 0);
+    if (!amount) throw new AppError('Enter the payment amount', 422);
+    const status = approver ? 'payment_received' : 'payment_pending';
+    await update(user, id, { status }, meta);
+    const lead = await findInScope(user, id);
+    ownLead(user, lead);
+    if (!lead.inPipeline) throw new AppError('Add this lead to the pipeline first', 400);
+    lead.paymentAmount = amount;
+    lead.paymentState = approver ? 'received' : 'awaiting';
+    await lead.save();
+    await addActivity({
+      lead, type: 'payment_received', actor: user,
+      description: approver ? `Payment of ₹${amount} received` : `Payment of ₹${amount} is waiting for confirmation`,
+      newValue: { amount, state: lead.paymentState },
+    });
+    return { data: presentLead(lead.toObject()), message: approver ? 'Payment received' : 'Sent for confirmation' };
+  }
+  if (body.paymentAction === 'approve' || body.paymentAction === 'return') {
+    if (!approver) throw new AppError('A team leader or above confirms the payment', 403);
+    const lead = await findInScope(user, id);
+    if (!lead.inPipeline) throw new AppError('Add this lead to the pipeline first', 400);
+    if (lead.paymentState !== 'awaiting') throw new AppError('This payment is not waiting for confirmation', 422);
+    if (body.paymentAction === 'approve') {
+      await update(user, id, { status: 'payment_received' }, meta);
+      const fresh = await findInScope(user, id);
+      fresh.paymentState = 'received';
+      await fresh.save();
+      await addActivity({
+        lead: fresh, type: 'payment_received', actor: user,
+        description: `Payment of ₹${fresh.paymentAmount || 0} confirmed`,
+        newValue: { amount: fresh.paymentAmount, state: 'received' },
+      });
+      return { data: presentLead(fresh.toObject()), message: 'Payment received' };
+    }
+    lead.paymentState = 'returned';
+    lead.status = 'payment_pending';
+    lead.statusChangedAt = new Date();
+    await lead.save();
+    await addActivity({
+      lead, type: 'payment_received', actor: user,
+      description: 'Payment was not received',
+      newValue: { amount: lead.paymentAmount, state: 'returned' },
+    });
+    return { data: presentLead(lead.toObject()), message: 'Marked as not received' };
+  }
+  if (body.status === 'payment_received') throw new AppError('Enter the payment amount', 422);
   if (body.status) await update(user, id, { status: body.status, lostReason: body.lostReason || '' }, meta);
   const lead = await findInScope(user, id);
   ownLead(user, lead);
@@ -770,6 +859,10 @@ async function updatePipeline(user, id, body, meta) {
   if (body.consultancyName !== undefined) lead.consultancyName = String(body.consultancyName || '').trim();
   if (body.proposedPlan !== undefined) lead.proposedPlan = Math.max(0, Number(body.proposedPlan) || 0);
   if (body.remarks !== undefined) lead.remarks = String(body.remarks || '').trim();
+  if (body.status && !['payment_pending', 'payment_received'].includes(body.status)) {
+    lead.paymentState = '';
+    lead.paymentAmount = 0;
+  }
   await lead.save();
   return { data: presentLead(lead.toObject()), message: 'Pipeline updated' };
 }
@@ -789,22 +882,40 @@ async function pipelineReport(user, query) {
     .populate('assignedTo', 'name')
     .sort({ name: 1 })
     .lean();
+  const approver = canConfirmPayment(user);
   const groups = new Map();
+  const place = (lead) => {
+    if (lead.paymentState === 'received' || lead.status === 'payment_received') return 'received';
+    if (lead.paymentState === 'awaiting') return approver ? 'confirm' : 'pending';
+    if (lead.paymentState === 'returned' || lead.status === 'payment_pending') return 'pending';
+    return 'active';
+  };
   rows.forEach((lead) => {
     const key = String(lead.assignedTo?._id || 'unassigned');
     if (!groups.has(key)) {
-      groups.set(key, { staffId: lead.assignedTo?._id || null, staffName: lead.assignedTo?.name || 'Unassigned', rows: [] });
+      groups.set(key, {
+        staffId: lead.assignedTo?._id || null,
+        staffName: lead.assignedTo?.name || 'Unassigned',
+        active: [],
+        pending: [],
+        confirm: [],
+        received: [],
+      });
     }
-    groups.get(key).rows.push(presentLead(lead));
+    groups.get(key)[place(lead)].push(presentLead(lead));
   });
+  const numberRows = (list) => list.map((row, index) => ({ ...row, sl: index + 1 }));
   let reports = [...groups.values()].sort((a, b) => a.staffName.localeCompare(b.staffName)).map((group) => ({
     staffId: group.staffId,
     staffName: group.staffName,
     title: `${group.staffName.toUpperCase()} REPORT`,
-    rows: group.rows.map((row, index) => ({ ...row, sl: index + 1 })),
+    rows: numberRows(group.active),
+    pending: numberRows(group.pending),
+    confirm: numberRows(group.confirm),
+    received: numberRows(group.received),
   }));
   if (selected && !reports.length) {
-    reports = [{ staffId: selected._id, staffName: selected.name, title: `${selected.name.toUpperCase()} REPORT`, rows: [] }];
+    reports = [{ staffId: selected._id, staffName: selected.name, title: `${selected.name.toUpperCase()} REPORT`, rows: [], pending: [], confirm: [], received: [] }];
   }
   const people = user.role === 'STAFF'
     ? []

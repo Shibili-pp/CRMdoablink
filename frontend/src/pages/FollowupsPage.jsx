@@ -65,12 +65,14 @@ export default function FollowupsPage() {
 
   return (
     <Page title="Follow-ups" subtitle="Due work, overdue items and the month at a glance.">
-      <div className="follow-switch" role="tablist" aria-label="Follow-up timing">
-        {buckets.map(([key, label]) => (
-          <button key={label} className={`btn ${bucket === key ? '' : 'secondary'}`} type="button" aria-pressed={bucket === key} onClick={() => setBucket(key)}>{label}</button>
-        ))}
+      <div className="toolbar" role="tablist" aria-label="Follow-up timing">
+        <div className="segment segment-scroll">
+          {buckets.map(([key, label]) => (
+            <button key={label} className={`btn ${bucket === key ? '' : 'secondary'}`} type="button" aria-pressed={bucket === key} onClick={() => setBucket(key)}>{label}</button>
+          ))}
+        </div>
       </div>
-      <div className="filters" role="group" aria-label="Follow-up filters">
+      <div className="toolbar" role="group" aria-label="Follow-up filters">
         {canFilterStaff && (
           <label className="field"><span>Staff</span>
             <select aria-label="Staff" value={staff} onChange={(event) => setStaff(event.target.value)}>
@@ -86,11 +88,13 @@ export default function FollowupsPage() {
           </select>
         </label>
       </div>
-      {summary && <div className="grid stats" style={{ marginBottom: 14 }}>
-        {[['On time', summary.onTime], ['Late', summary.late], ['Pending', summary.pending], ['Overdue', summary.overdue]].map(([label, value]) => (
-          <article key={label} className="card"><div className="stat-label">{label}</div><div className="stat-value">{value}</div></article>
-        ))}
-      </div>}
+      {summary && (
+        <div className="grid stats">
+          {[['On time', summary.onTime], ['Late', summary.late], ['Pending', summary.pending], ['Overdue', summary.overdue]].map(([label, value]) => (
+            <article key={label} className="card stat-card"><div className="stat-label">{label}</div><div className="stat-value">{value}</div></article>
+          ))}
+        </div>
+      )}
       <div className="follow-days">
         {calendar.map((day) => <Badge key={day.date}>{day.date}: {day.total}</Badge>)}
       </div>

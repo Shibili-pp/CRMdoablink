@@ -7,6 +7,7 @@ function Side({ title, people, otherId, staffId, onStaff, statuses, leadRoles = 
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('');
   const [leadRole, setLeadRole] = useState('');
+  const [untouched, setUntouched] = useState(false);
   const [rows, setRows] = useState([]);
 
   useEffect(() => {
@@ -14,15 +15,16 @@ function Side({ title, people, otherId, staffId, onStaff, statuses, leadRoles = 
       setRows([]);
       return undefined;
     }
-    const params = new URLSearchParams({ staff: staffId, limit: '100' });
+    const params = new URLSearchParams({ staff: staffId, limit: untouched ? '300' : '100' });
     if (query.trim()) params.set('q', query.trim());
     if (status) params.set('status', status);
     if (leadRole) params.set('leadRole', leadRole);
+    if (untouched) params.set('touch', 'untouched');
     const handle = setTimeout(() => {
       api.get(`/api/v1/leads?${params}`).then((response) => setRows(response.data.data || [])).catch(() => setRows([]));
     }, 200);
     return () => clearTimeout(handle);
-  }, [staffId, query, status, leadRole]);
+  }, [staffId, query, status, leadRole, untouched]);
 
   return (
     <section className="swap-side">
@@ -43,6 +45,7 @@ function Side({ title, people, otherId, staffId, onStaff, statuses, leadRoles = 
           <option value="">All roles</option>
           {leadRoles.map((role) => <option key={role.key} value={role.key}>{role.label}</option>)}
         </select>
+        <button className={`btn ${untouched ? '' : 'secondary'}`} type="button" disabled={!staffId} aria-pressed={untouched} onClick={() => setUntouched((on) => !on)}>Untouched leads</button>
       </div>
       <div className="swap-list">
         {rows.map((row) => (
@@ -51,7 +54,7 @@ function Side({ title, people, otherId, staffId, onStaff, statuses, leadRoles = 
             <span><strong>{row.name}</strong><span className="muted">{row.leadCode} · {leadRoles.find((role) => role.key === row.leadRole)?.label || 'No role'}</span></span>
           </label>
         ))}
-        {staffId && !rows.length && <p className="muted">No leads for this filter.</p>}
+        {staffId && !rows.length && <p className="muted">{untouched ? 'No untouched leads for this staff.' : 'No leads for this filter.'}</p>}
       </div>
       <p className="muted">{picked.length} selected</p>
     </section>

@@ -61,12 +61,14 @@ export async function downloadFile(url, filename) {
     const text = await response.data.text();
     throw new Error(JSON.parse(text).message || 'Export failed');
   }
-  const blobUrl = URL.createObjectURL(response.data);
+  const file = new File([response.data], filename, { type: type || 'application/octet-stream' });
+  const blobUrl = URL.createObjectURL(file);
   const link = document.createElement('a');
   link.href = blobUrl;
   link.download = filename;
   link.click();
-  URL.revokeObjectURL(blobUrl);
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1500);
+  return file;
 }
 
 export default api;

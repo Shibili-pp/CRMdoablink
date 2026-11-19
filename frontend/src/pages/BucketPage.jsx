@@ -19,11 +19,16 @@ export default function BucketPage() {
   const [sources, setSources] = useState([]);
   const [leadRoles, setLeadRoles] = useState([]);
   const [roleFilter, setRoleFilter] = useState('');
+  const [total, setTotal] = useState(null);
 
   const load = () => {
     const params = new URLSearchParams({ view: 'bucket', limit: '100' });
     if (roleFilter) params.set('leadRole', roleFilter);
-    api.get(`/api/v1/leads?${params}`).then((response) => setRows(response.data.data)).catch((error) => toast(messageFrom(error), 'error'));
+    api.get(`/api/v1/leads?${params}`).then((response) => {
+      const data = response.data.data || [];
+      setRows(data);
+      setTotal(response.data.meta?.total ?? data.length);
+    }).catch((error) => toast(messageFrom(error), 'error'));
     api.get('/api/v1/lead-assignments/workload').then((response) => setStaff(response.data.data.filter((person) => person.available))).catch(() => {});
   };
   useEffect(() => { load(); }, [roleFilter]);
@@ -58,7 +63,7 @@ export default function BucketPage() {
   };
 
   return (
-    <Page title="Lead bucket" subtitle="Unassigned leads only." actions={
+    <Page title="Lead bucket" subtitle={total == null ? 'Unassigned leads only.' : `${total} unassigned lead${total === 1 ? '' : 's'}.`} actions={
       <>
         <select value={staffId} onChange={(event) => setStaffId(event.target.value)}>
           <option value="">Assign selected to…</option>
@@ -77,6 +82,9 @@ export default function BucketPage() {
           </select>
         </label>
       </div>
+      <section className="lead-section" aria-label="Unassigned leads">
+        <h2>Unassigned leads{total == null ? '' : ` (${total})`}</h2>
+      </section>
       <DataTable rows={rows} empty="The bucket is empty" onRow={(row) => navigate(`/leads/${row._id}`)} columns={[
         { key: 'pick', label: '', render: (row) => <input type="checkbox" aria-label={`Select ${row.name}`} checked={selected.includes(row._id)} onChange={() => toggle(row._id)} onClick={(event) => event.stopPropagation()} /> },
         { key: 'leadCode', label: 'Lead ID' },
