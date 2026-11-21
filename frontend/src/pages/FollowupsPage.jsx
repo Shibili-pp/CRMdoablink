@@ -2,11 +2,12 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Phone } from 'lucide-react';
 import api from '../api/client';
-import { Badge, DataTable, Page } from '../components/ui';
+import { Badge, DataTable, FirmBadge, Page } from '../components/ui';
 import { messageFrom, useApp } from '../context/AppContext';
 
 const buckets = [
   ['today', 'Today'],
+  ['demo', 'Upcoming demos'],
   ['upcoming', 'Upcoming'],
   ['overdue', 'Overdue'],
   ['missed', 'Missed'],
@@ -27,7 +28,9 @@ export default function FollowupsPage() {
   const [summary, setSummary] = useState(null);
   const [calendar, setCalendar] = useState([]);
   const [leadRoles, setLeadRoles] = useState([]);
+  const [leadFirms, setLeadFirms] = useState([]);
   const [roleFilter, setRoleFilter] = useState('');
+  const [firmFilter, setFirmFilter] = useState('');
   const canFilterStaff = user?.role && user.role !== 'STAFF';
 
   useEffect(() => {
@@ -44,14 +47,18 @@ export default function FollowupsPage() {
     else params.set('limit', '50');
     if (canFilterStaff && staff) params.set('staff', staff);
     if (roleFilter) params.set('leadRole', roleFilter);
+    if (firmFilter) params.set('firm', firmFilter);
     const query = params.toString();
     api.get(`/api/v1/followups?${query}`).then((response) => setRows(response.data.data)).catch((error) => toast(messageFrom(error), 'error'));
     api.get(`/api/v1/followups/summary?${query}`).then((response) => setSummary(response.data.data)).catch(() => {});
     api.get(`/api/v1/followups/calendar?${query}`).then((response) => setCalendar(response.data.data.days || [])).catch(() => {});
   };
-  useEffect(() => { load(); }, [bucket, staff, roleFilter]);
+  useEffect(() => { load(); }, [bucket, staff, roleFilter, firmFilter]);
   useEffect(() => {
-    api.get('/api/v1/meta').then((response) => setLeadRoles(response.data.data.leadRoles || [])).catch(() => {});
+    api.get('/api/v1/meta').then((response) => {
+      setLeadRoles(response.data.data.leadRoles || []);
+      setLeadFirms(response.data.data.leadFirms || []);
+    }).catch(() => {});
   }, []);
 
   const complete = async (id) => {
@@ -81,10 +88,16 @@ export default function FollowupsPage() {
             </select>
           </label>
         )}
-        <label className="field"><span>Role</span>
-          <select aria-label="Role" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}>
-            <option value="">All roles</option>
+        <label className="field"><span>Client</span>
+          <select aria-label="Client" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}>
+            <option value="">All clients</option>
             {leadRoles.map((role) => <option key={role.key} value={role.key}>{role.label}</option>)}
+          </select>
+        </label>
+        <label className="field"><span>Firm</span>
+          <select aria-label="Firm" value={firmFilter} onChange={(event) => setFirmFilter(event.target.value)}>
+            <option value="">All firms</option>
+            {leadFirms.map((firm) => <option key={firm.key} value={firm.key}>{firm.label}</option>)}
           </select>
         </label>
       </div>
@@ -104,11 +117,14 @@ export default function FollowupsPage() {
       }} columns={[
         { key: 'leadCode', label: 'Lead ID', hideOnMobile: true },
         { key: 'leadName', label: 'Name' },
-        { key: 'leadRole', label: 'Role', render: (row) => leadRoles.find((role) => role.key === row.leadRole)?.label || '—' },
-        { key: 'title', label: 'Next action' },
+        { key: 'leadRole', label: 'Client', render: (row) => leadRoles.find((role) => role.key === row.leadRole)?.label || '—' },
+        { key: 'firm', label: 'Firm', render: (row) => <FirmBadge firm={row.firm} firms={leadFirms} /> },
+        { key: 'title', label: 'Next action', render: (row) => (
+          <span>{row.title}{row.isDemo ? <Badge tone="info"> Demo</Badge> : null}</span>
+        ) },
         ...(canFilterStaff ? [{ key: 'assigned', label: 'Staff', hideOnMobile: true, render: (row) => row.assignedTo?.name || '—' }] : []),
-        { key: 'due', label: 'Due', render: (row) => dueLabel(row.dueAt) },
-        { key: 'status', label: 'Status', render: (row) => <Badge tone={row.overdue || row.status === 'missed' ? 'danger' : row.status === 'completed' ? 'success' : 'info'}>{row.status}</Badge> },
+        { key: 'due', label: bucket === 'demo' ? 'Demo time' : 'Due', render: (row) => dueLabel(row.dueAt) },
+        { key: 'status', label: 'Status', render: (row) => <Badge tone={row.overdue || row.status === 'missed' ? 'danger' : row.status === 'completed' ? 'success' : 'info'}>{row.isDemo && row.status === 'pending' ? 'demo' : row.status}</Badge> },
         { key: 'call', label: 'Call', cellClass: 'lead-call', render: (row) => row.phoneNormalized ? (
           <a className="btn call-btn" href={`tel:+${row.phoneNormalized}`} aria-label={`Call ${row.leadName}`} onClick={(event) => event.stopPropagation()}><Phone size={16} /> Call</a>
         ) : '—' },

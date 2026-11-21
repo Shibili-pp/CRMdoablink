@@ -10,13 +10,16 @@ function statusKey(label) {
 export default function PresetPage() {
   const { toast } = useApp();
   const [showStatuses, setShowStatuses] = useState(false);
-  const [showRoles, setShowRoles] = useState(false);
+  const [showClients, setShowClients] = useState(false);
+  const [showFirms, setShowFirms] = useState(false);
   const [showSources, setShowSources] = useState(false);
   const [statuses, setStatuses] = useState([]);
-  const [roles, setRoles] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [firms, setFirms] = useState([]);
   const [sources, setSources] = useState([]);
   const [name, setName] = useState('');
-  const [roleName, setRoleName] = useState('');
+  const [clientName, setClientName] = useState('');
+  const [firmName, setFirmName] = useState('');
   const [sourceName, setSourceName] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -24,23 +27,22 @@ export default function PresetPage() {
     .then((response) => setStatuses(response.data.data || []))
     .catch((error) => toast(messageFrom(error), 'error'));
 
-  const loadRoles = () => api.get('/api/v1/lead-roles')
-    .then((response) => setRoles(response.data.data || []))
+  const loadClients = () => api.get('/api/v1/lead-roles')
+    .then((response) => setClients(response.data.data || []))
     .catch((error) => toast(messageFrom(error), 'error'));
 
-  useEffect(() => {
-    if (showStatuses) load();
-  }, [showStatuses]);
+  const loadFirms = () => api.get('/api/v1/lead-firms')
+    .then((response) => setFirms(response.data.data || []))
+    .catch((error) => toast(messageFrom(error), 'error'));
+
   const loadSources = () => api.get('/api/v1/lead-sources')
     .then((response) => setSources(response.data.data || []))
     .catch((error) => toast(messageFrom(error), 'error'));
 
-  useEffect(() => {
-    if (showRoles) loadRoles();
-  }, [showRoles]);
-  useEffect(() => {
-    if (showSources) loadSources();
-  }, [showSources]);
+  useEffect(() => { if (showStatuses) load(); }, [showStatuses]);
+  useEffect(() => { if (showClients) loadClients(); }, [showClients]);
+  useEffect(() => { if (showFirms) loadFirms(); }, [showFirms]);
+  useEffect(() => { if (showSources) loadSources(); }, [showSources]);
 
   const addStatus = async (event) => {
     event.preventDefault();
@@ -77,14 +79,14 @@ export default function PresetPage() {
     }
   };
 
-  const addRole = async (event) => {
+  const addClient = async (event) => {
     event.preventDefault();
     setBusy(true);
     try {
-      await api.post('/api/v1/lead-roles', { label: roleName.trim() });
-      setRoleName('');
-      toast('Role added');
-      await loadRoles();
+      await api.post('/api/v1/lead-roles', { label: clientName.trim() });
+      setClientName('');
+      toast('Client type added');
+      await loadClients();
     } catch (error) {
       toast(messageFrom(error), 'error');
     } finally {
@@ -92,12 +94,40 @@ export default function PresetPage() {
     }
   };
 
-  const removeRole = async (role) => {
+  const removeClient = async (client) => {
     setBusy(true);
     try {
-      await api.delete(`/api/v1/lead-roles/${role.key}`);
-      toast('Role removed');
-      await loadRoles();
+      await api.delete(`/api/v1/lead-roles/${client.key}`);
+      toast('Client type removed');
+      await loadClients();
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addFirm = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      await api.post('/api/v1/lead-firms', { label: firmName.trim() });
+      setFirmName('');
+      toast('Firm added');
+      await loadFirms();
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeFirm = async (firm) => {
+    setBusy(true);
+    try {
+      await api.delete(`/api/v1/lead-firms/${firm.key}`);
+      toast('Firm removed');
+      await loadFirms();
     } catch (error) {
       toast(messageFrom(error), 'error');
     } finally {
@@ -162,33 +192,63 @@ export default function PresetPage() {
           </form>
         </article>
       )}
-      <button className={`card preset-choice ${showRoles ? 'open' : ''}`} type="button" style={{ marginTop: 12 }} aria-expanded={showRoles} onClick={() => setShowRoles((open) => !open)}>
+
+      <button className={`card preset-choice ${showClients ? 'open' : ''}`} type="button" style={{ marginTop: 12 }} aria-expanded={showClients} onClick={() => setShowClients((open) => !open)}>
         <span>
-          <strong>Roles</strong>
-          <span className="muted">Student, consultant and any role you add</span>
+          <strong>Managing clients</strong>
+          <span className="muted">Student, education consultant and any client type you add</span>
         </span>
-        <span className="muted">{showRoles ? 'Hide' : 'Open'}</span>
+        <span className="muted">{showClients ? 'Hide' : 'Open'}</span>
       </button>
-      {showRoles && (
+      {showClients && (
         <article className="card lead-block">
-          <h3>Roles</h3>
-          <p className="muted">New leads and uploads ask for one of these. The role shows on every lead list.</p>
+          <h3>Managing clients</h3>
+          <p className="muted">New leads and uploads ask for one of these. The client type shows on every lead list.</p>
           <ul className="preset-list">
-            {roles.map((role) => (
-              <li key={role.key}>
-                <span>{role.label}</span>
-                <button className="btn danger" type="button" disabled={busy} onClick={() => removeRole(role)}>Delete</button>
+            {clients.map((client) => (
+              <li key={client.key}>
+                <span>{client.label}</span>
+                <button className="btn danger" type="button" disabled={busy} onClick={() => removeClient(client)}>Delete</button>
               </li>
             ))}
           </ul>
-          <form onSubmit={addRole}>
-            <Field label="New role">
-              <input aria-label="New role" value={roleName} onChange={(event) => setRoleName(event.target.value)} placeholder="Example: Student" required />
+          <form onSubmit={addClient}>
+            <Field label="New client type">
+              <input aria-label="New client type" value={clientName} onChange={(event) => setClientName(event.target.value)} placeholder="Example: Student" required />
             </Field>
-            <button className="btn lead-wide" type="submit" disabled={busy}>Add role</button>
+            <button className="btn lead-wide" type="submit" disabled={busy}>Add client type</button>
           </form>
         </article>
       )}
+
+      <button className={`card preset-choice ${showFirms ? 'open' : ''}`} type="button" style={{ marginTop: 12 }} aria-expanded={showFirms} onClick={() => setShowFirms((open) => !open)}>
+        <span>
+          <strong>Managing firm</strong>
+          <span className="muted">Doablink, Studlink and any firm you add</span>
+        </span>
+        <span className="muted">{showFirms ? 'Hide' : 'Open'}</span>
+      </button>
+      {showFirms && (
+        <article className="card lead-block">
+          <h3>Managing firm</h3>
+          <p className="muted">Every lead belongs to one firm. Lists and filters show Doablink or Studlink clearly.</p>
+          <ul className="preset-list">
+            {firms.map((firm) => (
+              <li key={firm.key}>
+                <span>{firm.label}</span>
+                <button className="btn danger" type="button" disabled={busy} onClick={() => removeFirm(firm)}>Delete</button>
+              </li>
+            ))}
+          </ul>
+          <form onSubmit={addFirm}>
+            <Field label="New firm">
+              <input aria-label="New firm" value={firmName} onChange={(event) => setFirmName(event.target.value)} placeholder="Example: Doablink" required />
+            </Field>
+            <button className="btn lead-wide" type="submit" disabled={busy}>Add firm</button>
+          </form>
+        </article>
+      )}
+
       <button className={`card preset-choice ${showSources ? 'open' : ''}`} type="button" style={{ marginTop: 12 }} aria-expanded={showSources} onClick={() => setShowSources((open) => !open)}>
         <span>
           <strong>Lead sources</strong>

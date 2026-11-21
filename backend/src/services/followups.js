@@ -30,8 +30,11 @@ async function list(user, query) {
   const now = new Date();
   if (query.status) filter.status = query.status;
   if (query.staff && user.role !== 'STAFF') filter.assignedTo = query.staff;
-  if (query.leadRole) {
-    const leadIds = await Lead.find({ deletedAt: null, leadRole: query.leadRole }).distinct('_id');
+  if (query.leadRole || query.firm) {
+    const leadFilter = { deletedAt: null };
+    if (query.leadRole) leadFilter.leadRole = query.leadRole;
+    if (query.firm) leadFilter.firm = query.firm;
+    const leadIds = await Lead.find(leadFilter).distinct('_id');
     filter.lead = { $in: leadIds };
   }
   if (query.priority) filter.priority = query.priority;
@@ -43,6 +46,11 @@ async function list(user, query) {
   } else if (query.bucket === 'upcoming') {
     filter.status = 'pending';
     filter.dueAt = { $gt: now };
+    filter.isDemo = { $ne: true };
+  } else if (query.bucket === 'demo') {
+    filter.status = 'pending';
+    filter.isDemo = true;
+    filter.dueAt = { $gte: now };
   } else if (query.bucket === 'overdue') {
     filter.status = { $in: ['pending', 'missed'] };
     filter.dueAt = { $lt: now };
@@ -59,7 +67,7 @@ async function list(user, query) {
   if (!query.order) sort.dueAt = 1;
   const [rows, total] = await Promise.all([
     FollowUp.find(filter).sort(sort).skip(skip).limit(limit)
-      .populate('lead', 'leadCode name status phoneNormalized leadRole')
+      .populate('lead', 'leadCode name status phoneNormalized leadRole firm')
       .lean(),
     FollowUp.countDocuments(filter),
   ]);
@@ -68,11 +76,11 @@ async function list(user, query) {
       ...row,
       phoneNormalized: row.lead?.phoneNormalized || '',
       leadRole: row.lead?.leadRole || '',
+      firm: row.lead?.firm || '',
       overdue: row.status === 'pending' && new Date(row.dueAt) < now,
     })),
     meta: metaFor(page, limit, total),
   };
-  return { data: rows.map((row) => ({ ...row, overdue: row.status === 'pending' && new Date(row.dueAt) < now })), meta: metaFor(page, limit, total) };
 }
 
 async function create(user, body, meta) {
@@ -225,16 +233,47 @@ async function calendar(user, query) {
 async function popups(user) {
   if (user.role !== 'STAFF') return { data: [], meta: { nextOpenAt: null } };
   const now = new Date();
+  const soon = new Date(now.getTime() + 15 * 60 * 1000);
   const mine = { assignedTo: user._id, status: { $in: ['pending', 'missed'] } };
-  const [rows, next] = await Promise.all([
+  const [overdue, demos, nextRemind, nextDemo] = await Promise.all([
     FollowUp.find({
       ...mine,
       dueAt: { $lte: now },
       $or: [{ remindAt: null }, { remindAt: { $lte: now } }],
-    }).sort({ dueAt: 1 }).limit(20).select('title leadName leadCode dueAt priority status remindAt').lean(),
-    FollowUp.findOne({ ...mine, remindAt: { $gt: now } }).sort({ remindAt: 1 }).select('remindAt').lean(),
+    }).sort({ dueAt: 1 }).limit(20).select('title leadName leadCode dueAt priority status remindAt lead isDemo').lean(),
+    FollowUp.find({
+      assignedTo: user._id,
+      status: 'pending',
+      isDemo: true,
+      dueAt: { $gt: now, $lte: soon },
+      $or: [{ popupDismissedAt: null }, { popupDismissedAt: { $exists: false } }],
+    }).sort({ dueAt: 1 }).limit(10).select('title leadName leadCode dueAt priority status lead isDemo').lean(),
+    FollowUp.findOne({ ...mine, remindAt: { $gt: now } }).sort({ remindAt: 1 }).select('remindAt dueAt').lean(),
+    FollowUp.findOne({
+      assignedTo: user._id,
+      status: 'pending',
+      isDemo: true,
+      dueAt: { $gt: soon },
+      $or: [{ popupDismissedAt: null }, { popupDismissedAt: { $exists: false } }],
+    }).sort({ dueAt: 1 }).select('dueAt').lean(),
   ]);
-  return { data: rows, meta: { nextOpenAt: next?.remindAt || null } };
+  const demoRows = demos.map((row) => ({ ...row, kind: 'demo_soon' }));
+  const overdueRows = overdue.map((row) => ({ ...row, kind: row.isDemo ? 'demo_overdue' : 'overdue' }));
+  const nextCandidates = [
+    nextRemind?.remindAt,
+    nextDemo?.dueAt ? new Date(new Date(nextDemo.dueAt).getTime() - 15 * 60 * 1000) : null,
+  ].filter(Boolean).map((value) => new Date(value).getTime());
+  const nextOpenAt = nextCandidates.length ? new Date(Math.min(...nextCandidates)) : null;
+  return { data: [...demoRows, ...overdueRows], meta: { nextOpenAt } };
+}
+
+async function dismissPopup(user, id) {
+  if (user.role !== 'STAFF') throw new AppError('Only staff can dismiss this reminder', 403);
+  const followUp = await FollowUp.findOne({ _id: id, assignedTo: user._id, isDemo: true, status: 'pending' });
+  if (!followUp) throw new AppError('Demo reminder not found', 404);
+  followUp.popupDismissedAt = new Date();
+  await followUp.save();
+  return { data: followUp, message: 'Demo reminder dismissed' };
 }
 
 async function remindLater(user, id, body, meta) {
@@ -298,10 +337,15 @@ async function processReminders() {
   const soon = new Date(now.getTime() + 15 * 60 * 1000);
   const upcoming = await FollowUp.find({ status: 'pending', reminderSentAt: null, dueAt: { $gte: now, $lte: soon } });
   for (const followUp of upcoming) {
+    const isDemo = Boolean(followUp.isDemo);
     await notify({
-      user: followUp.assignedTo, type: 'followup_due', title: 'Follow-up due soon',
-      body: `${followUp.leadName}: ${followUp.title}`, module: 'followups', recordId: followUp.id,
-      dedupeKey: `due:${followUp.id}`,
+      user: followUp.assignedTo,
+      type: isDemo ? 'demo_reminder' : 'followup_due',
+      title: isDemo ? 'Demo in 15 minutes' : 'Follow-up due soon',
+      body: `${followUp.leadName}: ${followUp.title}`,
+      module: isDemo ? 'leads' : 'followups',
+      recordId: isDemo ? String(followUp.lead) : followUp.id,
+      dedupeKey: `${isDemo ? 'demo' : 'due'}:${followUp.id}`,
     });
     followUp.reminderSentAt = now;
     await followUp.save();
@@ -330,5 +374,5 @@ function hourLabel(date, timeZone) {
 }
 
 module.exports = {
-  list, create, update, complete, summary, calendar, popups, remindLater, reassignFromStaff, processReminders, hourLabel,
+  list, create, update, complete, summary, calendar, popups, dismissPopup, remindLater, reassignFromStaff, processReminders, hourLabel,
 };

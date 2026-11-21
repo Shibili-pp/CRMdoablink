@@ -8,6 +8,7 @@
     "dev": "nodemon src/server.js",
     "seed": "node src/seed/seed.js",
     "seed:reset": "node src/seed/seed.js --reset",
+    "seed:clear": "node src/seed/seed.js --clear-only",
     "test": "jest --runInBand --forceExit",
     "backup": "node src/scripts/backup.js"
   },

@@ -3,7 +3,7 @@ const {
 } = require('../models');
 const { recordAudit } = require('./audit');
 const {
-  LEAD_ROLES, LEAD_SOURCES, ORIGINAL_LEAD_SOURCES, LEAD_STATUSES, PIPELINE_STAGES, ALERT_RULES, LEADERBOARD_WEIGHTS, COMPANY, BDA_WORKING_TARGET,
+  LEAD_ROLES, LEAD_FIRMS, LEAD_SOURCES, ORIGINAL_LEAD_SOURCES, LEAD_STATUSES, PIPELINE_STAGES, ALERT_RULES, LEADERBOARD_WEIGHTS, COMPANY, BDA_WORKING_TARGET,
 } = require('../config/constants');
 const { ALL_PERMISSIONS, ROLE_PERMISSIONS } = require('../config/permissions');
 const { AppError } = require('../utils/http');
@@ -36,7 +36,7 @@ async function getLeadRoles() {
 async function assertLeadRole(key) {
   const roles = await getLeadRoles();
   const match = roles.find((role) => role.key === key);
-  if (!match) throw new AppError('Choose a lead role', 422);
+  if (!match) throw new AppError('Choose a client type', 422);
   return match;
 }
 
@@ -47,27 +47,65 @@ function roleKey(label) {
 async function addLeadRole(user, body, meta) {
   const label = String(body.label || '').trim();
   const key = roleKey(label);
-  if (!key) throw new AppError('Use letters or numbers in the role name', 422);
+  if (!key) throw new AppError('Use letters or numbers in the client name', 422);
   const roles = await getLeadRoles();
-  if (roles.some((role) => role.key === key)) throw new AppError('That role already exists', 409);
+  if (roles.some((role) => role.key === key)) throw new AppError('That client type already exists', 409);
   const next = [...roles, { key, label }];
   await SystemSetting.updateOne({ key: 'leadRoles' }, { key: 'leadRoles', value: next }, { upsert: true });
   await recordAudit({
     user: user._id, username: user.username, action: 'leadRole.create', module: 'settings', newValues: { key, label }, ...meta,
   });
-  return { data: next, message: 'Role added' };
+  return { data: next, message: 'Client type added' };
 }
 
 async function removeLeadRole(user, key, meta) {
   const roles = await getLeadRoles();
-  if (roles.length <= 1) throw new AppError('Keep at least one role', 422);
+  if (roles.length <= 1) throw new AppError('Keep at least one client type', 422);
   const next = roles.filter((role) => role.key !== key);
-  if (next.length === roles.length) throw new AppError('Role not found', 404);
+  if (next.length === roles.length) throw new AppError('Client type not found', 404);
   await SystemSetting.updateOne({ key: 'leadRoles' }, { value: next });
   await recordAudit({
     user: user._id, username: user.username, action: 'leadRole.delete', module: 'settings', oldValues: { key }, ...meta,
   });
-  return { data: next, message: 'Role removed' };
+  return { data: next, message: 'Client type removed' };
+}
+
+async function getLeadFirms() {
+  const doc = await SystemSetting.findOne({ key: 'leadFirms' }).lean();
+  return Array.isArray(doc?.value) && doc.value.length ? doc.value : LEAD_FIRMS.map((firm) => ({ ...firm }));
+}
+
+async function assertLeadFirm(key) {
+  const firms = await getLeadFirms();
+  const match = firms.find((firm) => firm.key === key);
+  if (!match) throw new AppError('Choose a firm', 422);
+  return match;
+}
+
+async function addLeadFirm(user, body, meta) {
+  const label = String(body.label || '').trim();
+  const key = roleKey(label);
+  if (!key) throw new AppError('Use letters or numbers in the firm name', 422);
+  const firms = await getLeadFirms();
+  if (firms.some((firm) => firm.key === key)) throw new AppError('That firm already exists', 409);
+  const next = [...firms, { key, label }];
+  await SystemSetting.updateOne({ key: 'leadFirms' }, { key: 'leadFirms', value: next }, { upsert: true });
+  await recordAudit({
+    user: user._id, username: user.username, action: 'leadFirm.create', module: 'settings', newValues: { key, label }, ...meta,
+  });
+  return { data: next, message: 'Firm added' };
+}
+
+async function removeLeadFirm(user, key, meta) {
+  const firms = await getLeadFirms();
+  if (firms.length <= 1) throw new AppError('Keep at least one firm', 422);
+  const next = firms.filter((firm) => firm.key !== key);
+  if (next.length === firms.length) throw new AppError('Firm not found', 404);
+  await SystemSetting.updateOne({ key: 'leadFirms' }, { value: next });
+  await recordAudit({
+    user: user._id, username: user.username, action: 'leadFirm.delete', module: 'settings', oldValues: { key }, ...meta,
+  });
+  return { data: next, message: 'Firm removed' };
 }
 
 async function getLeadSources() {
@@ -223,6 +261,27 @@ async function updateRolePermissions(actor, role, permissions, meta) {
 }
 
 async function ensureReferenceData() {
+  const { Lead } = require('../models');
+  await Lead.updateMany(
+    { deletedAt: null, fromSheet: true, $or: [{ priority: { $in: ['medium', 'low', null] } }, { priorityRank: { $exists: false } }, { priorityRank: { $lt: 30 } }] },
+    { $set: { priority: 'high', priorityRank: 30 } },
+  );
+  await Lead.updateMany(
+    { deletedAt: null, priority: 'urgent', $or: [{ priorityRank: { $ne: 40 } }, { priorityRank: { $exists: false } }] },
+    { $set: { priorityRank: 40 } },
+  );
+  await Lead.updateMany(
+    { deletedAt: null, priority: 'high', $or: [{ priorityRank: { $ne: 30 } }, { priorityRank: { $exists: false } }] },
+    { $set: { priorityRank: 30 } },
+  );
+  await Lead.updateMany(
+    { deletedAt: null, priority: 'medium', $or: [{ priorityRank: { $ne: 20 } }, { priorityRank: { $exists: false } }] },
+    { $set: { priorityRank: 20 } },
+  );
+  await Lead.updateMany(
+    { deletedAt: null, priority: 'low', $or: [{ priorityRank: { $ne: 10 } }, { priorityRank: { $exists: false } }] },
+    { $set: { priorityRank: 10 } },
+  );
   const general = await SystemSetting.findOne({ key: 'general' });
   if (!general) {
     await SystemSetting.create({
@@ -237,6 +296,9 @@ async function ensureReferenceData() {
   }
   if (!await SystemSetting.findOne({ key: 'leadRoles' })) {
     await SystemSetting.create({ key: 'leadRoles', value: LEAD_ROLES });
+  }
+  if (!await SystemSetting.findOne({ key: 'leadFirms' })) {
+    await SystemSetting.create({ key: 'leadFirms', value: LEAD_FIRMS });
   }
   const storedSources = await SystemSetting.findOne({ key: 'leadSources' });
   if (!storedSources) {
@@ -255,12 +317,39 @@ async function ensureReferenceData() {
   }
   if (!await SystemSetting.findOne({ key: 'rolePermissions' })) {
     await SystemSetting.create({ key: 'rolePermissions', value: ROLE_PERMISSIONS });
+  } else {
+    const rolesDoc = await SystemSetting.findOne({ key: 'rolePermissions' });
+    const value = { ...(rolesDoc.value || {}) };
+    let rolesTouched = false;
+    ['ADMIN', 'SUPER_ADMIN'].forEach((role) => {
+      const current = Array.isArray(value[role]) ? value[role] : [...(ROLE_PERMISSIONS[role] || [])];
+      if (!current.includes('connections.manage')) {
+        value[role] = [...current, 'connections.manage'];
+        rolesTouched = true;
+      }
+    });
+    if (rolesTouched) {
+      await SystemSetting.updateOne({ key: 'rolePermissions' }, { value });
+      await User.updateMany(
+        { role: { $in: ['ADMIN', 'SUPER_ADMIN'] }, permissionMode: 'role', deletedAt: null },
+        { $addToSet: { permissions: 'connections.manage' } },
+      );
+    }
   }
   await Promise.all(LEAD_STATUSES.map((status) => CustomLeadStatus.updateOne(
     { key: status.key },
     { $setOnInsert: { ...status, isSystem: true, isActive: true } },
     { upsert: true }
   )));
+  for (const key of ['rnp', 'utc']) {
+    const status = LEAD_STATUSES.find((item) => item.key === key);
+    if (!status) continue;
+    await CustomLeadStatus.updateOne(
+      { key },
+      { $set: { label: status.label, category: status.category, sortOrder: status.sortOrder, isSystem: true, isActive: true } },
+      { upsert: true },
+    );
+  }
   await Promise.all(PIPELINE_STAGES.map((stage) => PipelineStage.updateOne(
     { key: stage.key },
     { $setOnInsert: { ...stage, isActive: true } },
@@ -379,6 +468,10 @@ module.exports = {
   assertLeadRole,
   addLeadRole,
   removeLeadRole,
+  getLeadFirms,
+  assertLeadFirm,
+  addLeadFirm,
+  removeLeadFirm,
   getLeadSources,
   assertLeadSource,
   addLeadSource,

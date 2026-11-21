@@ -41,6 +41,7 @@ function publicUser(user) {
     lastLoginAt: user.lastLoginAt,
     workStart: user.workStart || '',
     workEnd: user.workEnd || '',
+    managingClients: Array.isArray(user.managingClients) ? user.managingClients : [],
   };
 }
 

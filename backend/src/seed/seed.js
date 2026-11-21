@@ -1,10 +1,11 @@
 const bcrypt = require('bcryptjs');
 const {
-  Branch, Team, User, Lead, LeadActivity, LeadAssignment, LeadSwapRequest, FollowUp,
-  CallLog, CallRecording, RevenueOpportunity, Payment, Invoice, HourlyReport, Target,
-  Notification, LeaveRequest,
+  Branch, Team, User, Lead, LeadActivity, LeadAssignment, LeadSwapRequest, LeadImport, FollowUp,
+  CallLog, CallRecording, DialRequest, RevenueOpportunity, Payment, Invoice, HourlyReport,
+  HourlyManual, HourlyCheckIn, Target, Notification, LeaveRequest, AuditLog, SyncedContact, SyncBatch,
 } = require('../models');
 const { ensureReferenceData, roleTemplate } = require('../services/settings');
+const { ensureLoginAccounts } = require('./loginAccounts');
 const leads = require('../services/leads');
 const followups = require('../services/followups');
 const { recordCall } = require('../services/calls');
@@ -26,21 +27,64 @@ async function clearDemo() {
   const demoLeads = await Lead.find({ isDemo: true }).distinct('_id');
   const demoUsers = await User.find({ isDemo: true }).distinct('_id');
   await Promise.all([
-    LeadActivity.deleteMany({ lead: { $in: demoLeads } }),
+    LeadActivity.deleteMany({ $or: [{ lead: { $in: demoLeads } }, { isDemo: true }] }),
     LeadAssignment.deleteMany({ lead: { $in: demoLeads } }),
-    LeadSwapRequest.deleteMany({ lead: { $in: demoLeads } }),
-    FollowUp.deleteMany({ isDemo: true }),
-    CallLog.deleteMany({ isDemo: true }),
-    CallRecording.deleteMany({ isDemo: true }),
-    RevenueOpportunity.deleteMany({ isDemo: true }),
-    Payment.deleteMany({ isDemo: true }),
+    LeadSwapRequest.deleteMany({ $or: [{ lead: { $in: demoLeads } }, { isDemo: true }] }),
+    LeadImport.deleteMany({ isDemo: true }),
+    FollowUp.deleteMany({ $or: [{ isDemo: true }, { lead: { $in: demoLeads } }] }),
+    CallLog.deleteMany({ $or: [{ isDemo: true }, { dataSource: 'demo_seed' }, { lead: { $in: demoLeads } }] }),
+    CallRecording.deleteMany({ $or: [{ isDemo: true }, { lead: { $in: demoLeads } }] }),
+    DialRequest.deleteMany({ lead: { $in: demoLeads } }),
+    RevenueOpportunity.deleteMany({ $or: [{ isDemo: true }, { lead: { $in: demoLeads } }] }),
+    Payment.deleteMany({ $or: [{ isDemo: true }, { lead: { $in: demoLeads } }] }),
     Invoice.deleteMany({ isDemo: true }),
     HourlyReport.deleteMany({ staff: { $in: demoUsers } }),
+    HourlyManual.deleteMany({ staff: { $in: demoUsers } }),
+    HourlyCheckIn.deleteMany({ staff: { $in: demoUsers } }),
     Target.deleteMany({ isDemo: true }),
-    Notification.deleteMany({ user: { $in: demoUsers } }),
+    Notification.deleteMany({ $or: [{ user: { $in: demoUsers } }, { isDemo: true }] }),
     LeaveRequest.deleteMany({ isDemo: true }),
+    AuditLog.deleteMany({ isDemo: true }),
+    SyncedContact.deleteMany({ isDemo: true }),
+    SyncBatch.deleteMany({ isDemo: true }),
     Lead.deleteMany({ isDemo: true }),
   ]);
+}
+
+async function clearDummyKeepLogins() {
+  assertNotProduction();
+  await ensureReferenceData();
+  await clearDemo();
+  // Also remove leftover sample-style leads/calls that were not flagged isDemo.
+  const samplePhones = [
+    '919900000001', '919900000002', '919900000003', '919900000004', '919900000005',
+    '919900000006', '919900000007', '919900000008', '919900000101', '919900000102',
+    '919900000103', '919900000104', '919900000201', '919900000999',
+  ];
+  const leftover = await Lead.find({
+    $or: [
+      { phoneNormalized: { $in: samplePhones } },
+      { phone: { $regex: /^9900000/ } },
+      { name: { $regex: /^(Bucket Lead|Kochi Walk-in)/i } },
+    ],
+  }).distinct('_id');
+  if (leftover.length) {
+    await Promise.all([
+      LeadActivity.deleteMany({ lead: { $in: leftover } }),
+      LeadAssignment.deleteMany({ lead: { $in: leftover } }),
+      LeadSwapRequest.deleteMany({ lead: { $in: leftover } }),
+      FollowUp.deleteMany({ lead: { $in: leftover } }),
+      CallLog.deleteMany({ lead: { $in: leftover } }),
+      CallRecording.deleteMany({ lead: { $in: leftover } }),
+      RevenueOpportunity.deleteMany({ lead: { $in: leftover } }),
+      Payment.deleteMany({ lead: { $in: leftover } }),
+      Lead.deleteMany({ _id: { $in: leftover } }),
+    ]);
+  }
+  await CallLog.deleteMany({ dataSource: 'demo_seed' });
+  await ensureLoginAccounts();
+  const left = await Lead.countDocuments({ isDemo: true });
+  return { cleared: true, demoLeadsLeft: left };
 }
 
 async function ensureOrg() {
@@ -280,6 +324,11 @@ async function runFromCli() {
   require('dotenv').config();
   assertNotProduction();
   await connectDb();
+  if (process.argv.includes('--clear-only')) {
+    const result = await clearDummyKeepLogins();
+    console.log(`Dummy CRM data cleared. Role logins kept. Demo leads left: ${result.demoLeadsLeft}.`);
+    process.exit(0);
+  }
   const result = await seedDemo({ reset: process.argv.includes('--reset') });
   console.log(result.seeded ? 'Demo data seeded.' : 'Demo users verified. Leads were already present.');
   console.log('Demo passwords are 1234567 and are refused when NODE_ENV=production.');
@@ -293,4 +342,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { seedDemo };
+module.exports = { seedDemo, clearDemo, clearDummyKeepLogins };

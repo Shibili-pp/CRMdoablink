@@ -91,6 +91,16 @@ function requireAny(...permissions) {
   };
 }
 
+function requireRoles(...roles) {
+  return (req, res, next) => {
+    if (!req.user) return next(new AppError('Authentication required', 401));
+    if (!roles.includes(req.user.role)) {
+      return next(new AppError('Only Owner or Super Admin can perform this action', 403));
+    }
+    return next();
+  };
+}
+
 async function requireDevice(req, res, next) {
   try {
     const header = req.headers.authorization || '';
@@ -140,6 +150,7 @@ module.exports = {
   requireAuth,
   requirePermission,
   requireAny,
+  requireRoles,
   requireDevice,
   errorHandler,
 };

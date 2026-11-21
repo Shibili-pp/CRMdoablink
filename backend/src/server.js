@@ -6,9 +6,11 @@ const { initSocket } = require('./sockets');
 const { startJobs } = require('./jobs/scheduler');
 const { seedDemo } = require('./seed/seed');
 const { ensureLoginAccounts } = require('./seed/loginAccounts');
+const { ensureReferenceData } = require('./services/settings');
 
 async function main() {
   await connectDb();
+  await ensureReferenceData();
   if (process.env.NODE_ENV !== 'production' && process.env.SEED_DEMO === 'true') {
     const result = await seedDemo();
     console.log(result.seeded ? 'Demo accounts and sample data are ready.' : 'Demo reference data verified. Existing demo leads were left in place.');

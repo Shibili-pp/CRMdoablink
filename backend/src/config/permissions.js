@@ -34,6 +34,7 @@ const PERMISSIONS = [
   { key: 'audit.view', group: 'Security', label: 'View audit logs' },
   { key: 'settings.manage', group: 'Settings', label: 'Manage system settings' },
   { key: 'pipeline.manage', group: 'Settings', label: 'Manage statuses and pipelines' },
+  { key: 'connections.manage', group: 'Settings', label: 'Manage Google Sheet connections' },
   { key: 'roles.manage', group: 'Security', label: 'Manage role permissions' },
   { key: 'leaves.apply', group: 'Staff', label: 'Apply for leave' },
   { key: 'leaves.review', group: 'Staff', label: 'Review leave' },
@@ -85,6 +86,7 @@ const ADMIN = [
   'revenue.manage',
   'notifications.manage',
   'pipeline.manage',
+  'connections.manage',
 ];
 
 const SUPER_ADMIN = ALL_PERMISSIONS.filter((key) => key !== 'system.owner');

@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Phone } from 'lucide-react';
 import api from '../api/client';
-import { Empty, Field, LEAD_STATUS_COLORS, Modal, Page, SkeletonRows, money } from '../components/ui';
+import DemoScheduleModal from '../components/DemoScheduleModal';
+import { Empty, Field, FirmBadge, LEAD_STATUS_COLORS, Modal, Page, SkeletonRows, money } from '../components/ui';
 import { messageFrom, useApp } from '../context/AppContext';
 
 function localPhone(row) {
@@ -11,7 +12,7 @@ function localPhone(row) {
   return row.phoneDisplay || digits || '—';
 }
 
-function PipelineRow({ row, statuses, leadRoles, toast, onSaved, onClaim }) {
+function PipelineRow({ row, statuses, leadRoles, leadFirms, toast, onSaved, onClaim }) {
   const navigate = useNavigate();
   const [form, setForm] = useState({
     consultancyName: row.consultancyName || '',
@@ -19,6 +20,7 @@ function PipelineRow({ row, statuses, leadRoles, toast, onSaved, onClaim }) {
     remarks: row.remarks || '',
     status: row.status,
   });
+  const [demoPrompt, setDemoPrompt] = useState(false);
 
   useEffect(() => {
     setForm({
@@ -33,14 +35,20 @@ function PipelineRow({ row, statuses, leadRoles, toast, onSaved, onClaim }) {
     try {
       await api.patch(`/api/v1/leads/${row._id}/pipeline`, patch);
       onSaved();
+      return true;
     } catch (error) {
       toast(messageFrom(error), 'error');
+      return false;
     }
   };
 
   const changeStatus = async (status) => {
     if (status === 'payment_received') {
       onClaim(row);
+      return;
+    }
+    if (status === 'demo_booked') {
+      setDemoPrompt(true);
       return;
     }
     let lostReason = '';
@@ -56,10 +64,12 @@ function PipelineRow({ row, statuses, leadRoles, toast, onSaved, onClaim }) {
   const keep = (event) => event.stopPropagation();
 
   return (
+    <Fragment>
     <tr>
       <td className="pipeline-hide" data-label="SL NO"><span className="cell-value">{row.sl}</span></td>
       <td data-label="Name"><span className="cell-value"><button className="btn ghost" type="button" onClick={() => navigate(`/leads/${row._id}`)}>{row.name}</button></span></td>
-      <td data-label="Role"><span className="cell-value">{leadRoles.find((role) => role.key === row.leadRole)?.label || '—'}</span></td>
+      <td data-label="Client"><span className="cell-value">{leadRoles.find((role) => role.key === row.leadRole)?.label || '—'}</span></td>
+      <td data-label="Firm"><span className="cell-value"><FirmBadge firm={row.firm} firms={leadFirms} /></span></td>
       <td className="pipeline-hide" data-label="PHONE NUMBER"><span className="cell-value">{localPhone(row)}</span></td>
       <td className="pipeline-hide" data-label="CONSULTANCY NAME">
         <span className="cell-value">
@@ -92,6 +102,21 @@ function PipelineRow({ row, statuses, leadRoles, toast, onSaved, onClaim }) {
         </span>
       </td>
     </tr>
+    {demoPrompt && (
+      <DemoScheduleModal
+        leadName={row.name}
+        onCancel={() => setDemoPrompt(false)}
+        onConfirm={async ({ demoDate, demoTime }) => {
+          const ok = await save({ status: 'demo_booked', demoDate, demoTime });
+          if (ok) {
+            setForm({ ...form, status: 'demo_booked' });
+            setDemoPrompt(false);
+            toast('Demo booked · added to Follow-ups');
+          }
+        }}
+      />
+    )}
+    </Fragment>
   );
 }
 
@@ -135,18 +160,21 @@ export default function PipelinePage() {
   const [people, setPeople] = useState([]);
   const [statuses, setStatuses] = useState([]);
   const [leadRoles, setLeadRoles] = useState([]);
+  const [leadFirms, setLeadFirms] = useState([]);
   const [staff, setStaff] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
+  const [firmFilter, setFirmFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [claim, setClaim] = useState(null);
   const [amount, setAmount] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const load = (staffId = staff, role = roleFilter, quiet = false) => {
+  const load = (staffId = staff, role = roleFilter, firm = firmFilter, quiet = false) => {
     if (!quiet) setLoading(true);
     const params = new URLSearchParams();
     if (staffId) params.set('staff', staffId);
     if (role) params.set('leadRole', role);
+    if (firm) params.set('firm', firm);
     Promise.all([
       api.get(`/api/v1/pipeline?${params}`),
       api.get('/api/v1/meta'),
@@ -155,10 +183,11 @@ export default function PipelinePage() {
       setPeople(reportRes.data.meta?.staff || []);
       setStatuses(metaRes.data.data.statuses || []);
       setLeadRoles(metaRes.data.data.leadRoles || []);
+      setLeadFirms(metaRes.data.data.leadFirms || []);
     }).catch((error) => toast(messageFrom(error), 'error')).finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(staff, roleFilter); }, [staff, roleFilter]);
+  useEffect(() => { load(staff, roleFilter, firmFilter); }, [staff, roleFilter, firmFilter]);
 
   const openClaim = (row) => {
     setClaim(row);
@@ -173,7 +202,7 @@ export default function PipelinePage() {
       const response = await api.patch(`/api/v1/leads/${claim._id}/pipeline`, { paymentAction: 'submit', paymentAmount: Number(amount) || 0 });
       toast(response.data.message || 'Payment saved');
       setClaim(null);
-      load(staff, roleFilter, true);
+      load(staff, roleFilter, firmFilter, true);
     } catch (error) {
       toast(messageFrom(error), 'error');
     } finally {
@@ -185,7 +214,7 @@ export default function PipelinePage() {
     try {
       const response = await api.patch(`/api/v1/leads/${row._id}/pipeline`, { paymentAction });
       toast(response.data.message || 'Updated');
-      load(staff, roleFilter, true);
+      load(staff, roleFilter, firmFilter, true);
     } catch (error) {
       toast(messageFrom(error), 'error');
     }
@@ -195,10 +224,16 @@ export default function PipelinePage() {
     <Page title="Pipeline" subtitle="Each staff member has their own pipeline. Payment received leaves this list until a team leader or above confirms the amount.">
       <div className="toolbar" role="group" aria-label="Pipeline view">
         {people.length > 0 && <button className={`btn ${staff ? 'secondary' : ''}`} type="button" onClick={() => setStaff('')}>All</button>}
-        <label className="field"><span>Role</span>
-          <select aria-label="Role" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}>
-            <option value="">All roles</option>
+        <label className="field"><span>Client</span>
+          <select aria-label="Client" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}>
+            <option value="">All clients</option>
             {leadRoles.map((role) => <option key={role.key} value={role.key}>{role.label}</option>)}
+          </select>
+        </label>
+        <label className="field"><span>Firm</span>
+          <select aria-label="Firm" value={firmFilter} onChange={(event) => setFirmFilter(event.target.value)}>
+            <option value="">All firms</option>
+            {leadFirms.map((firm) => <option key={firm.key} value={firm.key}>{firm.label}</option>)}
           </select>
         </label>
         {people.length > 0 && (
@@ -228,7 +263,8 @@ export default function PipelinePage() {
                     <tr>
                       <th>SL NO</th>
                       <th>NAME</th>
-                      <th>ROLE</th>
+                      <th>CLIENT</th>
+                      <th>FIRM</th>
                       <th>PHONE NUMBER</th>
                       <th>CONSULTANCY NAME</th>
                       <th>STATUS</th>
@@ -239,7 +275,7 @@ export default function PipelinePage() {
                   </thead>
                   <tbody>
                     {report.rows.map((row) => (
-                      <PipelineRow key={row._id} row={row} statuses={statuses} leadRoles={leadRoles} toast={toast} onSaved={() => load(staff, roleFilter, true)} onClaim={openClaim} />
+                      <PipelineRow key={row._id} row={row} statuses={statuses} leadRoles={leadRoles} leadFirms={leadFirms} toast={toast} onSaved={() => load(staff, roleFilter, firmFilter, true)} onClaim={openClaim} />
                     ))}
                   </tbody>
                 </table>

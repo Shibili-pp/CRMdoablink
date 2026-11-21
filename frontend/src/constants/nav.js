@@ -4,7 +4,9 @@ export const NAV = [
   { to: '/pipeline', label: 'Pipeline', icon: 'pipeline', permission: 'leads.view' },
   { to: '/lead-bucket', label: 'Lead Bucket', icon: 'bucket', permission: 'leads.assign' },
   { to: '/assignments', label: 'Lead Assignment', icon: 'assign', permission: 'leads.assign' },
+  { to: '/allow-assigning', label: 'Allow assigning', icon: 'assignAllow', roles: ['OWNER', 'SUPER_ADMIN'] },
   { to: '/followups', label: 'Follow-ups', icon: 'followups', permission: 'followups.view' },
+  { to: '/calls-today', label: 'Calls today', icon: 'callsToday', permission: 'calls.view' },
   { to: '/calls', label: 'Calling Analytics', icon: 'calls', permission: 'calls.view' },
   { to: '/hourly-reports', label: 'Hourly Reports', icon: 'hourly', permission: 'hourly.view' },
   { to: '/staff', label: 'Staff Management', icon: 'staff', permission: 'staff.view' },
@@ -16,6 +18,7 @@ export const NAV = [
   { to: '/audit-logs', label: 'Audit Logs', icon: 'audit', permission: 'audit.view' },
   { to: '/branches', label: 'Branch Management', icon: 'branches', any: ['branches.manage', 'teams.manage'] },
   { to: '/preset', label: 'Preset', icon: 'preset', permission: 'pipeline.manage' },
+  { to: '/connection', label: 'Connection', icon: 'connection', permission: 'connections.manage' },
   { to: '/settings', label: 'Settings', icon: 'settings', permission: 'settings.manage' },
 ];
 

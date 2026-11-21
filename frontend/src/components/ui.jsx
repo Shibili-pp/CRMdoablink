@@ -19,6 +19,24 @@ export function Badge({ children, tone = '' }) {
   return <span className={`badge ${tone}`}>{children}</span>;
 }
 
+export function FirmBadge({ firm, firms = [] }) {
+  const label = firms.find((item) => item.key === firm)?.label || firm || '—';
+  if (!firm) return <span className="badge firm-other">—</span>;
+  const tone = firm === 'doablink' ? 'firm-doablink' : firm === 'studlink' ? 'firm-studlink' : 'firm-other';
+  return <span className={`badge ${tone}`}>{label}</span>;
+}
+
+export function PriorityBadge({ priority }) {
+  const value = String(priority || 'medium').toLowerCase();
+  const tone = value === 'urgent' || value === 'high'
+    ? 'priority-high'
+    : value === 'low'
+      ? 'priority-low'
+      : 'priority-medium';
+  const label = value === 'high' ? 'High priority' : value.charAt(0).toUpperCase() + value.slice(1);
+  return <span className={`badge ${tone}`}>{label}</span>;
+}
+
 export const LEAD_STATUS_COLORS = {
   fresh: { bg: '#dbeafe', fg: '#1e40af' },
   not_contacted: { bg: '#e2e8f0', fg: '#334155' },
@@ -34,6 +52,8 @@ export const LEAD_STATUS_COLORS = {
   onboarding_pending: { bg: '#e0f2fe', fg: '#0369a1' },
   onboarded: { bg: '#bbf7d0', fg: '#166534' },
   follow_up_required: { bg: '#fef9c3', fg: '#a16207' },
+  rnp: { bg: '#ffedd5', fg: '#9a3412' },
+  utc: { bg: '#e0e7ff', fg: '#3730a3' },
   not_interested: { bg: '#ffe4e6', fg: '#be123c' },
   disqualified: { bg: '#f5f5f4', fg: '#57534e' },
   lost: { bg: '#fee2e2', fg: '#b91c1c' },
@@ -54,6 +74,8 @@ const LEAD_STATUS_LABELS = {
   onboarding_pending: 'Onboarding Pending',
   onboarded: 'Onboarded',
   follow_up_required: 'Follow-up Required',
+  rnp: 'RNP',
+  utc: 'UTC',
   not_interested: 'Not Interested',
   disqualified: 'Disqualified',
   lost: 'Lost',
@@ -129,7 +151,7 @@ export function DataTable({ columns, rows, loading, empty, onRow, rowClass, page
       <div className="table-wrap">
         <table>
           <thead>
-            <tr>{columns.map((column) => <th key={column.key} className={cellClass(column)}>{column.label}</th>)}</tr>
+            <tr>{columns.map((column) => <th key={column.key} className={cellClass(column)}>{column.header || column.label}</th>)}</tr>
           </thead>
           <tbody>
             {rows.map((row) => (

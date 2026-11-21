@@ -3,7 +3,7 @@ const { LeadImport, Lead } = require('../models');
 const { AppError, paging, metaFor } = require('../utils/http');
 const { normalizePhone, isValidPhone } = require('../utils/phone');
 const { HEADER_ALIASES, IMPORT_FIELDS, PRIORITIES, QUALITIES } = require('../config/constants');
-const { getGeneral, getLeadSources, assertLeadRole, assertLeadSource } = require('./settings');
+const { getGeneral, getLeadSources, assertLeadRole, assertLeadFirm, assertLeadSource, activeStatuses } = require('./settings');
 const { nextLeadCode, presentLead } = require('./leads');
 const { addActivity } = require('./activity');
 const { recordAudit } = require('./audit');
@@ -48,14 +48,43 @@ function applyMapping(raw, mapping) {
   return mapped;
 }
 
-async function validateRows(rawRows, mapping, countryCode, sources) {
+function normalizeStatusToken(value) {
+  return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+function resolveStatusKey(value, statuses) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const token = normalizeStatusToken(raw);
+  const match = (statuses || []).find((status) => (
+    status.key === token
+    || normalizeStatusToken(status.label) === token
+    || String(status.label || '').trim().toLowerCase() === raw.toLowerCase()
+  ));
+  return match ? match.key : null;
+}
+
+async function validateRows(rawRows, mapping, countryCode, sources, statuses) {
   const prepared = rawRows.map((raw, index) => ({ raw, mapped: applyMapping(raw, mapping), rowNumber: index + 2 }));
   const seen = new Map();
   const phones = prepared.map((row) => normalizePhone(row.mapped.phone, countryCode)).filter(Boolean);
+  // Check every non-deleted lead in the database (bucket + already assigned to staff).
   const existing = phones.length
-    ? await Lead.find({ deletedAt: null, phoneNormalized: { $in: phones } }).select('phoneNormalized leadCode').lean()
+    ? await Lead.find({
+      deletedAt: null,
+      $or: [
+        { phoneNormalized: { $in: phones } },
+        { alternatePhoneNormalized: { $in: phones } },
+      ],
+    }).select('phoneNormalized alternatePhoneNormalized leadCode name assignedTo').populate('assignedTo', 'name').lean()
     : [];
-  const existingByPhone = new Map(existing.map((lead) => [lead.phoneNormalized, lead]));
+  const existingByPhone = new Map();
+  existing.forEach((lead) => {
+    if (lead.phoneNormalized && !existingByPhone.has(lead.phoneNormalized)) existingByPhone.set(lead.phoneNormalized, lead);
+    if (lead.alternatePhoneNormalized && !existingByPhone.has(lead.alternatePhoneNormalized)) {
+      existingByPhone.set(lead.alternatePhoneNormalized, lead);
+    }
+  });
   return prepared.map((row) => {
     const errors = [];
     const phoneNormalized = normalizePhone(row.mapped.phone, countryCode);
@@ -65,6 +94,11 @@ async function validateRows(rawRows, mapping, countryCode, sources) {
     if (row.mapped.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.mapped.email)) errors.push('Email is invalid');
     if (row.mapped.priority && !PRIORITIES.includes(row.mapped.priority.toLowerCase())) errors.push('Priority is invalid');
     if (row.mapped.quality && !QUALITIES.includes(row.mapped.quality.toLowerCase())) errors.push('Quality is invalid');
+    let statusKey = '';
+    if (row.mapped.status) {
+      statusKey = resolveStatusKey(row.mapped.status, statuses);
+      if (!statusKey) errors.push('Stage/status value is not a known lead status');
+    }
     let duplicateInFile = false;
     if (phoneNormalized) {
       if (seen.has(phoneNormalized)) duplicateInFile = true;
@@ -74,11 +108,13 @@ async function validateRows(rawRows, mapping, countryCode, sources) {
     return {
       rowNumber: row.rowNumber,
       raw: row.raw,
-      mapped: { ...row.mapped, phoneNormalized },
+      mapped: { ...row.mapped, phoneNormalized, statusKey },
       rowErrors: errors,
       duplicateInFile,
       duplicateLeadId: existingLead?._id,
       duplicateLeadCode: existingLead?.leadCode || '',
+      duplicateLeadName: existingLead?.name || '',
+      duplicateAssignedTo: existingLead?.assignedTo?.name || '',
       valid: errors.length === 0,
     };
   });
@@ -98,7 +134,8 @@ async function createPreview(user, file, mappingOverride, meta) {
   const mapping = { ...detected, ...(mappingOverride || {}) };
   const general = await getGeneral();
   const sources = await getLeadSources();
-  const rows = await validateRows(rawRows, mapping, general.countryCode, sources);
+  const statuses = await activeStatuses();
+  const rows = await validateRows(rawRows, mapping, general.countryCode, sources, statuses);
   const summary = summarize(rows);
   const doc = await LeadImport.create({
     uploadedBy: user._id,
@@ -194,12 +231,39 @@ async function remap(user, id, mapping) {
   if (!doc || doc.status !== 'preview') throw new AppError('Import preview not found', 404);
   const general = await getGeneral();
   const sources = await getLeadSources();
+  const statuses = await activeStatuses();
   const rawRows = doc.rows.map((row) => row.raw);
   doc.mapping = mapping;
-  doc.rows = await validateRows(rawRows, mapping, general.countryCode, sources);
+  doc.rows = await validateRows(rawRows, mapping, general.countryCode, sources, statuses);
   doc.summary = summarize(doc.rows);
   await doc.save();
   return { data: publicImport(doc, true), message: 'Mapping updated' };
+}
+
+async function removeDuplicates(user, id) {
+  const doc = await LeadImport.findById(id);
+  if (!doc || doc.status !== 'preview') throw new AppError('Import preview not found', 404);
+  const kept = [];
+  const seen = new Set();
+  let removed = 0;
+  doc.rows.forEach((row) => {
+    const phone = row.mapped?.phoneNormalized || '';
+    const isDuplicate = Boolean(row.duplicateLeadId) || Boolean(row.duplicateInFile) || (phone && seen.has(phone));
+    if (isDuplicate) {
+      removed += 1;
+      return;
+    }
+    if (phone) seen.add(phone);
+    kept.push(row);
+  });
+  doc.rows = kept;
+  doc.summary = summarize(doc.rows);
+  doc.markModified('rows');
+  await doc.save();
+  return {
+    data: publicImport(doc, true),
+    message: removed ? `Removed ${removed} duplicate row${removed === 1 ? '' : 's'}` : 'No duplicates to remove',
+  };
 }
 
 async function commit(user, id, body, meta) {
@@ -214,7 +278,10 @@ async function commit(user, id, body, meta) {
   const selected = new Set((body.rowNumbers || []).map(Number));
   const general = await getGeneral();
   const sources = await getLeadSources();
+  const statuses = await activeStatuses();
+  const defaultStatus = statuses.some((item) => item.key === 'fresh') ? 'fresh' : (statuses[0]?.key || 'fresh');
   const leadRole = await assertLeadRole(body.leadRole);
+  const firm = await assertLeadFirm(body.firm);
   const source = await assertLeadSource(body.source);
   let imported = 0;
   let updated = 0;
@@ -231,7 +298,7 @@ async function commit(user, id, body, meta) {
       if (row.duplicateLeadId && body.updateExisting && !row.duplicateInFile) {
         try {
           await Lead.updateOne({ _id: row.duplicateLeadId, deletedAt: null }, {
-            $set: fieldsFromMapped(row.mapped, sources),
+            $set: fieldsFromMapped(row.mapped, sources, defaultStatus),
           });
           row.action = 'updated';
           row.importedLeadId = row.duplicateLeadId;
@@ -251,20 +318,23 @@ async function commit(user, id, body, meta) {
     } else {
       try {
         const phoneNormalized = normalizePhone(row.mapped.phone, general.countryCode);
+        const mappedFields = fieldsFromMapped(row.mapped, sources, defaultStatus);
         const lead = await Lead.create({
           leadCode: await nextLeadCode(),
           name: row.mapped.name,
           phone: row.mapped.phone,
           phoneNormalized,
-          ...fieldsFromMapped(row.mapped, sources),
+          ...mappedFields,
           source,
           leadRole: leadRole.key,
+          firm: firm.key,
           branch,
           createdBy: user._id,
           assignedTo: null,
           bucketStatus: 'unassigned',
           importBatch: doc._id,
-          status: 'fresh',
+          status: mappedFields.status || defaultStatus,
+          statusChangedAt: new Date(),
         });
         await addActivity({
           lead, type: 'lead_imported', actor: user,
@@ -299,22 +369,30 @@ async function commit(user, id, body, meta) {
   return { data: { id: doc.id, summary: doc.summary, status: doc.status }, message: 'Import completed' };
 }
 
-function fieldsFromMapped(mapped, sources) {
+function fieldsFromMapped(mapped, sources, defaultStatus = 'fresh') {
   const revenue = Number(String(mapped.expectedRevenue || '').replace(/[^0-9.]/g, ''));
+  const status = mapped.statusKey || defaultStatus;
   return {
     alternatePhone: mapped.alternatePhone || '',
     alternatePhoneNormalized: mapped.alternatePhone ? normalizePhone(mapped.alternatePhone) : '',
     email: mapped.email || '',
     company: mapped.company || '',
+    consultancyName: mapped.consultancyName || '',
     district: mapped.district || '',
     city: mapped.city || '',
     state: mapped.state || '',
     country: mapped.country || 'India',
     category: mapped.category || '',
-    priority: PRIORITIES.includes(String(mapped.priority || '').toLowerCase()) ? mapped.priority.toLowerCase() : 'medium',
+    status,
+    priority: PRIORITIES.includes(String(mapped.priority || '').toLowerCase()) ? mapped.priority.toLowerCase() : 'high',
+    priorityRank: ({ urgent: 40, high: 30, medium: 20, low: 10 })[
+      PRIORITIES.includes(String(mapped.priority || '').toLowerCase()) ? mapped.priority.toLowerCase() : 'high'
+    ],
     quality: QUALITIES.includes(String(mapped.quality || '').toLowerCase()) ? mapped.quality.toLowerCase() : '',
     expectedRevenue: Number.isFinite(revenue) ? revenue : 0,
     notes: mapped.notes || '',
+    comment: mapped.comment || '',
+    remarks: mapped.remarks || '',
     tags: mapped.tags ? String(mapped.tags).split(/[|,]/).map((tag) => tag.trim()).filter(Boolean) : [],
     source: sources?.includes(mapped.source) ? mapped.source : undefined,
   };
@@ -338,6 +416,7 @@ module.exports = {
   list,
   getOne,
   remap,
+  removeDuplicates,
   commit,
   failureRows,
   detectMapping,

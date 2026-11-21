@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { messageFrom, useApp } from '../context/AppContext';
 
@@ -10,11 +11,13 @@ function tomorrowKey() {
 
 export default function OverduePopup() {
   const { user, toast } = useApp();
+  const navigate = useNavigate();
   const [items, setItems] = useState([]);
   const [nextOpenAt, setNextOpenAt] = useState(null);
   const [form, setForm] = useState({ date: tomorrowKey(), time: '10:00', reason: '' });
   const [saving, setSaving] = useState(false);
   const current = items[0];
+  const isDemoSoon = current?.kind === 'demo_soon';
 
   const load = () => {
     if (user?.role !== 'STAFF') return;
@@ -38,6 +41,30 @@ export default function OverduePopup() {
   }, [nextOpenAt]);
 
   if (user?.role !== 'STAFF' || !current) return null;
+
+  const openLead = async () => {
+    const leadId = current.lead?._id || current.lead;
+    if (isDemoSoon) {
+      try {
+        await api.post(`/api/v1/followups/${current._id}/dismiss-popup`);
+      } catch (_) { /* ignore */ }
+      setItems((rows) => rows.filter((row) => row._id !== current._id));
+    }
+    if (leadId) navigate(`/leads/${leadId}`);
+  };
+
+  const dismissDemo = async () => {
+    setSaving(true);
+    try {
+      await api.post(`/api/v1/followups/${current._id}/dismiss-popup`);
+      setItems((rows) => rows.filter((row) => row._id !== current._id));
+      load();
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const submit = async (event) => {
     event.preventDefault();
@@ -64,10 +91,27 @@ export default function OverduePopup() {
     }
   };
 
+  if (isDemoSoon) {
+    return (
+      <div className="alert-lock" role="alertdialog" aria-modal="true" aria-labelledby="demo-soon-title">
+        <div className="modal">
+          <p className="muted">{items.filter((row) => row.kind === 'demo_soon').length > 1 ? `Demo reminder 1 of ${items.filter((row) => row.kind === 'demo_soon').length}` : 'Demo reminder'}</p>
+          <h2 id="demo-soon-title">Demo in 15 minutes</h2>
+          <p>{current.leadCode ? `${current.leadCode} · ` : ''}{current.leadName}</p>
+          <p className="muted">Starts {new Date(current.dueAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}.</p>
+          <div className="actions" style={{ marginTop: 14 }}>
+            <button className="btn secondary" type="button" onClick={dismissDemo} disabled={saving}>Dismiss</button>
+            <button className="btn" type="button" onClick={openLead} disabled={saving}>Open lead</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="alert-lock" role="alertdialog" aria-modal="true" aria-labelledby="overdue-title">
       <form className="modal" onSubmit={submit}>
-        <p className="muted">{items.length > 1 ? `Overdue follow-up 1 of ${items.length}` : 'Overdue follow-up'}</p>
+        <p className="muted">{items.filter((row) => row.kind !== 'demo_soon').length > 1 ? `Overdue follow-up 1 of ${items.filter((row) => row.kind !== 'demo_soon').length}` : 'Overdue follow-up'}</p>
         <h2 id="overdue-title">{current.title}</h2>
         <p>{current.leadCode ? `${current.leadCode} · ` : ''}{current.leadName}</p>
         <p className="muted">Due {new Date(current.dueAt).toLocaleString()}. Enter a later date, time and reason. The popup closes, then opens again at that time.</p>

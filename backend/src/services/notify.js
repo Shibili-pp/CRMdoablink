@@ -19,6 +19,8 @@ async function notify(input) {
         type: doc.type,
         title: doc.title,
         body: doc.body,
+        module: doc.module,
+        recordId: doc.recordId,
         createdAt: doc.createdAt,
       });
     }

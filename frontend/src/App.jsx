@@ -2,11 +2,14 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { useApp } from './context/AppContext';
 import { Empty, Page } from './components/ui';
 import AppLayout from './layouts/AppLayout';
+import AllowAssignPage from './pages/AllowAssignPage';
 import AssignmentsPage from './pages/AssignmentsPage';
 import AuditPage from './pages/AuditPage';
 import BranchesPage from './pages/BranchesPage';
 import BucketPage from './pages/BucketPage';
 import CallsPage from './pages/CallsPage';
+import CallsTodayPage from './pages/CallsTodayPage';
+import ConnectionPage from './pages/ConnectionPage';
 import DashboardPage from './pages/DashboardPage';
 import FollowupsPage from './pages/FollowupsPage';
 import HourlyPage from './pages/HourlyPage';
@@ -31,9 +34,10 @@ function Guard() {
   return <AppLayout />;
 }
 
-function Permit({ permission, any, children }) {
-  const { can } = useApp();
-  const allowed = any ? can(...any) : can(permission);
+function Permit({ permission, any, roles, children }) {
+  const { can, user } = useApp();
+  const roleOk = roles ? roles.includes(user?.role) : true;
+  const allowed = roleOk && (any ? can(...any) : permission ? can(permission) : true);
   if (allowed) return children;
   return (
     <Page title="Not available" subtitle="This module is outside your role.">
@@ -54,7 +58,9 @@ export default function App() {
         <Route path="/leads/:id" element={<Permit permission="leads.view"><LeadDetailPage /></Permit>} />
         <Route path="/lead-bucket" element={<Permit permission="leads.assign"><BucketPage /></Permit>} />
         <Route path="/assignments" element={<Permit permission="leads.assign"><AssignmentsPage /></Permit>} />
+        <Route path="/allow-assigning" element={<Permit roles={['OWNER', 'SUPER_ADMIN']}><AllowAssignPage /></Permit>} />
         <Route path="/followups" element={<Permit permission="followups.view"><FollowupsPage /></Permit>} />
+        <Route path="/calls-today" element={<Permit permission="calls.view"><CallsTodayPage /></Permit>} />
         <Route path="/calls" element={<Permit permission="calls.view"><CallsPage /></Permit>} />
         <Route path="/hourly-reports" element={<Permit permission="hourly.view"><HourlyPage /></Permit>} />
         <Route path="/staff" element={<Permit permission="staff.view"><StaffPage /></Permit>} />
@@ -67,6 +73,7 @@ export default function App() {
         <Route path="/audit-logs" element={<Permit permission="audit.view"><AuditPage /></Permit>} />
         <Route path="/branches" element={<Permit any={['branches.manage', 'teams.manage']}><BranchesPage /></Permit>} />
         <Route path="/preset" element={<Permit permission="pipeline.manage"><PresetPage /></Permit>} />
+        <Route path="/connection" element={<Permit permission="connections.manage"><ConnectionPage /></Permit>} />
         <Route path="/settings" element={<Permit any={['settings.manage', 'pipeline.manage']}><SettingsPage /></Permit>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

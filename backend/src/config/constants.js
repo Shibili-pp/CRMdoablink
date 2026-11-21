@@ -13,6 +13,11 @@ const LEAD_ROLES = [
   { key: 'education_consultant', label: 'Education consultant' },
 ];
 
+const LEAD_FIRMS = [
+  { key: 'doablink', label: 'Doablink' },
+  { key: 'studlink', label: 'Studlink' },
+];
+
 const LEAD_SOURCES = [
   'Meta',
   'Scrapped lead',
@@ -46,6 +51,8 @@ const LEAD_STATUSES = [
   { key: 'onboarding_pending', label: 'Onboarding Pending', category: 'won', sortOrder: 120 },
   { key: 'onboarded', label: 'Onboarded', category: 'won', sortOrder: 130 },
   { key: 'follow_up_required', label: 'Follow-up Required', category: 'open', sortOrder: 140 },
+  { key: 'rnp', label: 'RNP', category: 'open', sortOrder: 145 },
+  { key: 'utc', label: 'UTC', category: 'open', sortOrder: 146 },
   { key: 'not_interested', label: 'Not Interested', category: 'lost', sortOrder: 150 },
   { key: 'disqualified', label: 'Disqualified', category: 'lost', sortOrder: 160 },
   { key: 'lost', label: 'Lost', category: 'lost', sortOrder: 170 },
@@ -115,15 +122,19 @@ const IMPORT_FIELDS = [
   { key: 'alternatePhone', label: 'Alternate phone' },
   { key: 'email', label: 'Email' },
   { key: 'company', label: 'Company' },
+  { key: 'consultancyName', label: 'Consultancy name' },
   { key: 'district', label: 'District' },
   { key: 'city', label: 'City' },
   { key: 'state', label: 'State' },
   { key: 'country', label: 'Country' },
   { key: 'category', label: 'Category' },
+  { key: 'status', label: 'Status (Excel: Stage)' },
   { key: 'priority', label: 'Priority' },
   { key: 'quality', label: 'Quality' },
   { key: 'expectedRevenue', label: 'Expected revenue' },
   { key: 'notes', label: 'Notes' },
+  { key: 'comment', label: 'Comment' },
+  { key: 'remarks', label: 'Remark' },
   { key: 'tags', label: 'Tags' },
 ];
 
@@ -133,15 +144,19 @@ const HEADER_ALIASES = {
   alternatePhone: ['alternate phone', 'alt phone', 'phone 2', 'secondary phone', 'alternate number'],
   email: ['email', 'email address', 'mail'],
   company: ['company', 'business', 'business name', 'company name', 'organisation', 'organization'],
+  consultancyName: ['consultancy name', 'consultancy', 'consultant name', 'consultancyname'],
   district: ['district'],
   city: ['city', 'town'],
   state: ['state', 'province'],
   country: ['country'],
   category: ['category', 'lead category'],
+  status: ['status', 'stage', 'lead status', 'lead stage', 'pipeline stage'],
   priority: ['priority'],
   quality: ['quality', 'lead quality'],
   expectedRevenue: ['expected revenue', 'revenue', 'deal value', 'amount'],
-  notes: ['notes', 'note', 'remarks', 'comment'],
+  notes: ['notes', 'note'],
+  comment: ['comment', 'comments'],
+  remarks: ['remarks', 'remark'],
   tags: ['tags', 'tag'],
 };
 
@@ -166,10 +181,24 @@ const BDA_WORKING_TARGET = {
   ],
 };
 
+/**
+ * After sheet leads: split remaining daily call target (120 − sheet).
+ * reserved (15%) is NOT auto-assigned — Team Leader+ reassigns manually
+ * (e.g. not interested / special cases to another staff).
+ */
+const DAILY_ASSIGN_SHARES = {
+  dailyTarget: 120,
+  rnp: 0.3,
+  bulkUnassigned: 0.4,
+  utc: 0.15,
+  reservedManual: 0.15,
+};
+
 module.exports = {
   ROLES,
   ROLE_RANK,
   LEAD_ROLES,
+  LEAD_FIRMS,
   LEAD_SOURCES,
   ORIGINAL_LEAD_SOURCES,
   LEAD_STATUSES,
@@ -190,4 +219,5 @@ module.exports = {
   DATA_SOURCES,
   COMPANY,
   BDA_WORKING_TARGET,
+  DAILY_ASSIGN_SHARES,
 };

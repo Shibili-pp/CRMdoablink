@@ -1,6 +1,6 @@
 const express = require('express');
 const multer = require('multer');
-const { validate, requireAuth, requirePermission, requireAny, requireDevice } = require('../middleware');
+const { validate, requireAuth, requirePermission, requireAny, requireRoles, requireDevice } = require('../middleware');
 const { action } = require('../controllers/action');
 const schemas = require('../validators/schemas');
 const auth = require('../services/auth');
@@ -19,6 +19,8 @@ const reports = require('../services/reports');
 const inbox = require('../services/inbox');
 const audit = require('../services/audit');
 const alerts = require('../services/alerts');
+const sheets = require('../services/sheets');
+const autoAssign = require('../services/autoAssign');
 const { PERMISSIONS, ROLE_PERMISSIONS } = require('../config/permissions');
 const { TARGET_TYPES, PRIORITIES, QUALITIES, ROLES, IMPORT_FIELDS } = require('../config/constants');
 const { AppError } = require('../utils/http');
@@ -80,6 +82,7 @@ router.get('/meta', action(async () => ({
     sources: await settings.getLeadSources(),
     importFields: IMPORT_FIELDS,
     leadRoles: await settings.getLeadRoles(),
+    leadFirms: await settings.getLeadFirms(),
     statuses: await settings.activeStatuses(),
     stages: await settings.activeStages(),
     general: await settings.getGeneral(),
@@ -119,6 +122,7 @@ router.get('/leads/export', requirePermission('leads.export'), q, action(async (
 router.get('/leads', requirePermission('leads.view'), q, action((req) => leads.list(req.user, req.query)));
 router.post('/leads', requirePermission('leads.create'), validate({ body: schemas.lead }), action((req, meta) => leads.create(req.user, req.body, meta)));
 router.post('/leads/bulk/status', requirePermission('leads.edit'), validate({ body: schemas.bulkStatus }), action((req, meta) => leads.bulkStatus(req.user, req.body, meta)));
+router.post('/leads/bulk/delete', requirePermission('leads.delete'), validate({ body: schemas.bulkDelete }), action((req, meta) => leads.bulkRemove(req.user, req.body, meta)));
 router.get('/leads/:id', requirePermission('leads.view'), id, action((req) => leads.getById(req.user, req.params.id)));
 router.patch('/leads/:id', requirePermission('leads.edit'), id, validate({ body: schemas.leadPatch }), action((req, meta) => leads.update(req.user, req.params.id, req.body, meta)));
 router.delete('/leads/:id', requirePermission('leads.delete'), id, action((req, meta) => leads.remove(req.user, req.params.id, meta)));
@@ -141,6 +145,7 @@ router.post('/lead-imports', importGate, upload.single('file'), action(async (re
 }));
 router.get('/lead-imports/:id', importGate, id, action((req) => imports.getOne(req.user, req.params.id)));
 router.post('/lead-imports/:id/mapping', importGate, id, validate({ body: schemas.mapping }), action((req) => imports.remap(req.user, req.params.id, req.body.mapping)));
+router.post('/lead-imports/:id/remove-duplicates', importGate, id, action((req) => imports.removeDuplicates(req.user, req.params.id)));
 router.post('/lead-imports/:id/commit', importGate, id, validate({ body: schemas.commit }), action((req, meta) => imports.commit(req.user, req.params.id, req.body, meta)));
 router.get('/lead-imports/:id/failures', importGate, id, action(async (req, meta) => {
   const rows = await imports.failureRows(req.user, req.params.id);
@@ -159,6 +164,7 @@ router.post('/lead-swaps/:id/approve', requirePermission('leads.assign'), id, va
 router.post('/lead-swaps/:id/reject', requirePermission('leads.assign'), id, validate({ body: schemas.swapReview }), action((req, meta) => leads.reviewSwap(req.user, req.params.id, { ...req.body, status: 'rejected' }, meta)));
 
 router.get('/followups/popups', requirePermission('followups.view'), action((req) => followups.popups(req.user)));
+router.post('/followups/:id/dismiss-popup', requirePermission('followups.view'), id, action((req) => followups.dismissPopup(req.user, req.params.id)));
 router.get('/followups/summary', requirePermission('followups.view'), q, action((req) => followups.summary(req.user, req.query)));
 router.get('/followups/calendar', requirePermission('followups.view'), q, action((req) => followups.calendar(req.user, req.query)));
 router.get('/followups', requirePermission('followups.view'), q, action((req) => followups.list(req.user, req.query)));
@@ -169,6 +175,7 @@ router.post('/followups/:id/remind', requirePermission('followups.manage'), id, 
 router.post('/followups/reassign', requirePermission('followups.manage'), validate({ body: schemas.reassign }), action((req, meta) => followups.reassignFromStaff(req.user, req.body, meta)));
 
 router.get('/calls/analytics', requirePermission('calls.view'), q, action((req) => calls.analytics(req.user, req.query)));
+router.get('/calls/today-queue', requirePermission('calls.view'), q, action((req) => leads.todayCallQueue(req.user, req.query)));
 router.get('/calls/employees/export', requirePermission('calls.view'), q, action((req) => calls.exportEmployees(req.user, req.query)));
 router.get('/calls/staff/:id', requirePermission('calls.view'), id, q, action((req) => calls.employeeReport(req.user, req.params.id, req.query)));
 router.get('/calls', requirePermission('calls.view'), q, action((req) => calls.listCalls(req.user, req.query)));
@@ -234,6 +241,71 @@ router.get('/audit-logs', requirePermission('audit.view'), q, action((req) => au
 router.get('/alert-rules', requireAny('settings.manage', 'dashboard.view'), action(() => alerts.listRules()));
 router.patch('/alert-rules/:id', requirePermission('settings.manage'), id, validate({ body: schemas.alertPatch }), action((req, meta) => settings.updateAlertRule(req.user, req.params.id, req.body, meta)));
 
+router.get('/sheet-connections', requirePermission('connections.manage'), q, action((req) => sheets.listConnections(req.user, req.query)));
+router.post('/sheet-connections/preview', requirePermission('connections.manage'), validate({ body: schemas.sheetPreview }), action((req) => sheets.previewSheet(req.user, req.body)));
+router.post('/sheet-connections', requirePermission('connections.manage'), validate({ body: schemas.sheetCreate }), action((req, meta) => sheets.createConnection(req.user, req.body, meta)));
+router.patch('/sheet-connections/:id', requirePermission('connections.manage'), id, validate({ body: schemas.sheetPatch }), action((req, meta) => sheets.updateConnection(req.user, req.params.id, req.body, meta)));
+router.delete('/sheet-connections/:id', requirePermission('connections.manage'), id, action((req, meta) => sheets.removeConnection(req.user, req.params.id, meta)));
+router.post('/sheet-connections/:id/sync', requirePermission('connections.manage'), id, action((req) => sheets.syncConnection(req.params.id, { force: true })));
+router.post('/sheet-connections/sync-all', requirePermission('connections.manage'), action(async () => ({ data: await sheets.syncAllEnabled(), message: 'Sheet sync finished' })));
+router.get('/lead-assignments/allow', requireRoles('OWNER', 'SUPER_ADMIN'), action((req) => {
+  const assignAllow = require('../services/assignAllow');
+  return assignAllow.preview(req.user);
+}));
+router.get('/lead-assignments/allow-status', requirePermission('leads.assign'), action(async () => {
+  const assignAllow = require('../services/assignAllow');
+  return assignAllow.status();
+}));
+router.post('/lead-assignments/allow', requireRoles('OWNER', 'SUPER_ADMIN'), validate({ body: schemas.assignAllow }), action((req) => {
+  const assignAllow = require('../services/assignAllow');
+  return assignAllow.allowAndAssign(req.user, req.body);
+}));
+router.post('/lead-assignments/auto-assign', requirePermission('leads.assign'), action(async () => {
+  const assignAllow = require('../services/assignAllow');
+  const allow = await assignAllow.getTodayAllow();
+  if (!allow.allowed) {
+    return { data: { blocked: true }, message: 'Owner or Super Admin must Allow assigning first today' };
+  }
+  const data = await autoAssign.runDailyAutoAssign({
+    presentStaffIds: allow.presentStaffIds,
+    ignoreWorkHours: true,
+  });
+  const parts = [];
+  if (data.sheet?.assigned) parts.push(`${data.sheet.assigned} sheet`);
+  if (data.rnp?.assigned) parts.push(`${data.rnp.assigned} RNP (30%)`);
+  if (data.utc?.assigned) parts.push(`${data.utc.assigned} UTC (15%)`);
+  if (data.bulk?.assigned) parts.push(`${data.bulk.assigned} unassigned (40%)`);
+  return {
+    data,
+    message: parts.length
+      ? `Assigned ${parts.join(' · ')} · 15% left for TL+ manual reassign`
+      : 'No leads were auto-assigned (sheet / RNP 30% / UTC 15% / unassigned 40%)',
+  };
+}));
+router.post('/lead-assignments/auto-assign-rnp', requirePermission('leads.assign'), action(async () => {
+  const assignAllow = require('../services/assignAllow');
+  const allow = await assignAllow.getTodayAllow();
+  if (!allow.allowed) return { data: { blocked: true }, message: 'Allow assigning first today' };
+  const rnp = require('../services/rnp');
+  const data = await rnp.autoAssignRnpLeads({ presentStaffIds: allow.presentStaffIds, ignoreWorkHours: true });
+  return { data, message: data.assigned ? `Assigned ${data.assigned} RNP lead${data.assigned === 1 ? '' : 's'}` : 'No RNP leads were assigned' };
+}));
+router.post('/lead-assignments/auto-assign-utc', requirePermission('leads.assign'), action(async () => {
+  const assignAllow = require('../services/assignAllow');
+  const allow = await assignAllow.getTodayAllow();
+  if (!allow.allowed) return { data: { blocked: true }, message: 'Allow assigning first today' };
+  const utc = require('../services/utc');
+  const data = await utc.autoAssignUtcLeads({ presentStaffIds: allow.presentStaffIds, ignoreWorkHours: true });
+  return { data, message: data.assigned ? `Assigned ${data.assigned} UTC lead${data.assigned === 1 ? '' : 's'}` : 'No UTC leads were assigned' };
+}));
+router.post('/lead-assignments/auto-assign-bulk', requirePermission('leads.assign'), action(async () => {
+  const assignAllow = require('../services/assignAllow');
+  const allow = await assignAllow.getTodayAllow();
+  if (!allow.allowed) return { data: { blocked: true }, message: 'Allow assigning first today' };
+  const data = await autoAssign.autoAssignBulkLeads({ presentStaffIds: allow.presentStaffIds, ignoreWorkHours: true });
+  return { data, message: data.assigned ? `Assigned ${data.assigned} bulk lead${data.assigned === 1 ? '' : 's'}` : 'No bulk bucket leads were assigned' };
+}));
+
 router.get('/settings', requireAny('settings.manage', 'pipeline.manage'), action(() => settings.listSettings()));
 router.put('/settings/:key', requirePermission('settings.manage'), validate({ params: schemas.keyParam, body: schemas.setting }), action((req, meta) => settings.updateSetting(req.user, req.params.key, req.body.value, meta)));
 router.get('/lead-sources', requirePermission('pipeline.manage'), action(async () => ({ data: await settings.getLeadSources() })));
@@ -242,6 +314,9 @@ router.delete('/lead-sources/:name', requirePermission('pipeline.manage'), valid
 router.get('/lead-roles', requirePermission('pipeline.manage'), action(async () => ({ data: await settings.getLeadRoles() })));
 router.post('/lead-roles', requirePermission('pipeline.manage'), validate({ body: schemas.leadRoleBody }), action((req, meta) => settings.addLeadRole(req.user, req.body, meta)));
 router.delete('/lead-roles/:key', requirePermission('pipeline.manage'), validate({ params: schemas.leadRoleParam }), action((req, meta) => settings.removeLeadRole(req.user, req.params.key, meta)));
+router.get('/lead-firms', requirePermission('pipeline.manage'), action(async () => ({ data: await settings.getLeadFirms() })));
+router.post('/lead-firms', requirePermission('pipeline.manage'), validate({ body: schemas.leadFirmBody }), action((req, meta) => settings.addLeadFirm(req.user, req.body, meta)));
+router.delete('/lead-firms/:key', requirePermission('pipeline.manage'), validate({ params: schemas.leadFirmParam }), action((req, meta) => settings.removeLeadFirm(req.user, req.params.key, meta)));
 router.get('/lead-statuses', requirePermission('pipeline.manage'), action(() => settings.listStatuses()));
 router.post('/lead-statuses', requirePermission('pipeline.manage'), validate({ body: schemas.statusBody }), action((req, meta) => settings.saveStatus(req.user, req.body, meta)));
 router.patch('/lead-statuses/:id', requirePermission('pipeline.manage'), id, validate({ body: schemas.statusBody }), action((req, meta) => settings.saveStatus(req.user, req.body, meta, req.params.id)));

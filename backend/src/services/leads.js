@@ -6,16 +6,30 @@ const { normalizePhone, isValidPhone, formatPhone } = require('../utils/phone');
 const { recordAudit, changed } = require('./audit');
 const { notify, notifyMany } = require('./notify');
 const { addActivity, statusLabel } = require('./activity');
-const { getGeneral, getLeadSources, assertLeadRole, activeStatuses } = require('./settings');
+const { getGeneral, getLeadSources, assertLeadRole, assertLeadFirm, activeStatuses } = require('./settings');
 const {
   leadScope, bucketScope, staffScope, combine, isElevated, hasPermission,
 } = require('./access');
 const { staffOnLeave } = require('./org');
 const { LOST_STATUSES } = require('../config/constants');
-const { dateKeyOf, dayBounds } = require('../utils/time');
+const { dateKeyOf, dayBounds, combineLocal } = require('../utils/time');
 
-const LEAD_SORT = ['createdAt', 'name', 'expectedRevenue', 'status', 'priority', 'followUpAt', 'leadCode', 'lastContactedAt', 'assignmentDate'];
-const STAFF_FIELDS = ['name', 'phone', 'status', 'nextActionTitle', 'nextActionDueAt', 'notes', 'lostReason', 'tags', 'followUpAt', 'priority', 'quality', 'leadRole'];
+const LEAD_SORT = ['createdAt', 'name', 'expectedRevenue', 'status', 'priority', 'priorityRank', 'followUpAt', 'leadCode', 'lastContactedAt', 'assignmentDate'];
+const STAFF_FIELDS = ['name', 'phone', 'status', 'nextActionTitle', 'nextActionDueAt', 'notes', 'comment', 'consultancyName', 'remarks', 'lostReason', 'tags', 'followUpAt', 'priority', 'quality', 'leadRole', 'expectedRevenue'];
+const PRIORITY_RANK = { urgent: 40, high: 30, medium: 20, low: 10 };
+
+function priorityRankOf(priority) {
+  return PRIORITY_RANK[String(priority || '').toLowerCase()] || PRIORITY_RANK.high;
+}
+
+function leadListSort(query) {
+  if (!query.sort || query.sort === 'assignmentDate' || query.sort === 'priority') {
+    const dateDir = query.sort === 'assignmentDate' && query.order === 'asc' ? 1 : -1;
+    const rankDir = query.sort === 'priority' && query.order === 'asc' ? 1 : -1;
+    return { priorityRank: rankDir, assignmentDate: dateDir, createdAt: -1 };
+  }
+  return sortFrom(query, LEAD_SORT);
+}
 
 async function nextLeadCode() {
   await Counter.updateOne({ _id: 'lead' }, { $setOnInsert: { seq: 10000 } }, { upsert: true });
@@ -55,10 +69,22 @@ async function buildLeadFilter(user, query, { bucket = false } = {}) {
   });
   if (clean(query.staff)) filter.assignedTo = query.staff;
   if (clean(query.leadRole)) filter.leadRole = query.leadRole;
+  if (clean(query.firm)) filter.firm = query.firm;
+  if (query.fromSheet === 'true') filter.fromSheet = true;
+  if (query.fromSheet === 'false') filter.fromSheet = { $ne: true };
   if (clean(query.team)) filter.team = query.team;
   if (clean(query.branch) && isElevated(user)) filter.branch = query.branch;
   if (query.bucket === 'unassigned') filter.assignedTo = null;
   if (query.bucket === 'assigned') filter.assignedTo = { $ne: null };
+  if (query.bucket === 'rnp' || query.section === 'rnp') {
+    filter.status = 'rnp';
+    filter.assignedTo = null;
+  } else if (query.bucket === 'utc' || query.section === 'utc') {
+    filter.status = 'utc';
+    filter.assignedTo = null;
+  } else if (bucket && query.section !== 'all') {
+    filter.status = { $nin: ['rnp', 'utc'] };
+  }
   if (!bucket && query.bucket !== 'unassigned' && !clean(query.staff)) filter.assignedTo = { $ne: null };
   if (query.assignedFrom || query.assignedTo) {
     const fromKey = dateKeyOf(query.assignedFrom, 'Asia/Kolkata');
@@ -110,9 +136,9 @@ async function list(user, query) {
   const bucket = query.view === 'bucket';
   const { page, limit, skip } = paging(query);
   const filter = await buildLeadFilter(user, query, { bucket });
-  const sort = query.sort
-    ? sortFrom(query, LEAD_SORT)
-    : { assignmentDate: -1, createdAt: -1 };
+  const sort = bucket
+    ? (query.sort ? sortFrom(query, LEAD_SORT) : { createdAt: -1 })
+    : leadListSort(query);
   if (!bucket && (query.touch === 'untouched' || query.touch === 'worked')) {
     const ids = await untouchedLeadIds(filter);
     if (query.touch === 'untouched') filter._id = { $in: ids };
@@ -176,7 +202,24 @@ async function create(user, body, meta) {
   const status = body.status || (statuses.some((item) => item.key === 'fresh') ? 'fresh' : statuses[0]?.key);
   await assertStatus(status);
   const leadRole = await assertLeadRole(body.leadRole);
+  const firm = await assertLeadFirm(body.firm);
   const phones = await preparePhones(body, general.countryCode);
+  const existingPhone = await Lead.findOne({
+    deletedAt: null,
+    $or: [
+      { phoneNormalized: phones.phoneNormalized },
+      { alternatePhoneNormalized: phones.phoneNormalized },
+    ],
+  }).select('leadCode name assignedTo').populate('assignedTo', 'name').lean();
+  if (existingPhone) {
+    const who = existingPhone.assignedTo?.name
+      ? `assigned to ${existingPhone.assignedTo.name}`
+      : 'in the lead bucket';
+    throw new AppError(
+      `This mobile number is already used by ${existingPhone.leadCode}${existingPhone.name ? ` (${existingPhone.name})` : ''}, ${who}. Duplicate check covers all leads in the database, not only the bucket.`,
+      409,
+    );
+  }
   let assignedTo = body.assignedTo || null;
   let team = body.team || null;
   let branch = body.branch || user.branch || null;
@@ -214,8 +257,10 @@ async function create(user, body, meta) {
     country: body.country || 'India',
     source: body.source,
     leadRole: leadRole.key,
+    firm: firm.key,
     category: body.category || '',
-    priority: body.priority || 'medium',
+    priority: body.priority || 'high',
+    priorityRank: priorityRankOf(body.priority || 'high'),
     quality: body.quality || '',
     assignedTo,
     team,
@@ -230,6 +275,9 @@ async function create(user, body, meta) {
     revenueProbability: body.revenueProbability || 0,
     followUpAt: body.followUpAt || body.nextActionDueAt || null,
     notes: body.notes || '',
+    comment: body.comment || '',
+    consultancyName: body.consultancyName || '',
+    remarks: body.remarks || '',
     lostReason: body.lostReason || '',
     tags: body.tags || [],
     bucketStatus: assignedTo ? 'assigned' : 'unassigned',
@@ -275,10 +323,36 @@ async function update(user, id, body, meta) {
       phone: patch.phone || lead.phone,
       alternatePhone: patch.alternatePhone !== undefined ? patch.alternatePhone : lead.alternatePhone,
     }, general.countryCode);
-    if (patch.phone) patch.phoneNormalized = phones.phoneNormalized;
+    if (patch.phone) {
+      patch.phoneNormalized = phones.phoneNormalized;
+      if (phones.phoneNormalized !== lead.phoneNormalized) {
+        const existingPhone = await Lead.findOne({
+          deletedAt: null,
+          _id: { $ne: lead._id },
+          $or: [
+            { phoneNormalized: phones.phoneNormalized },
+            { alternatePhoneNormalized: phones.phoneNormalized },
+          ],
+        }).select('leadCode name assignedTo').populate('assignedTo', 'name').lean();
+        if (existingPhone) {
+          const who = existingPhone.assignedTo?.name
+            ? `assigned to ${existingPhone.assignedTo.name}`
+            : 'in the lead bucket';
+          throw new AppError(
+            `This mobile number is already used by ${existingPhone.leadCode}${existingPhone.name ? ` (${existingPhone.name})` : ''}, ${who}. Duplicate check covers all leads in the database, not only the bucket.`,
+            409,
+          );
+        }
+      }
+    }
     if (patch.alternatePhone !== undefined) patch.alternatePhoneNormalized = phones.alternatePhoneNormalized;
   }
+  if (patch.priority) {
+    patch.priority = String(patch.priority).toLowerCase();
+    patch.priorityRank = priorityRankOf(patch.priority);
+  }
   if (patch.leadRole) await assertLeadRole(patch.leadRole);
+  if (patch.firm) await assertLeadFirm(patch.firm);
   if (patch.source) {
     const sources = await getLeadSources();
     if (!sources.includes(patch.source)) throw new AppError('Choose a configured lead source', 422);
@@ -290,6 +364,22 @@ async function update(user, id, body, meta) {
       if (!patch.lostReason && !lead.lostReason) throw new AppError('A lost reason is required', 422);
     }
     patch.statusChangedAt = new Date();
+    if (patch.status === 'rnp') {
+      const at = new Date();
+      patch.rnpMarkedAt = at;
+      patch.rnpNextCallAt = new Date(at.getTime() + (3 * 60 * 60 * 1000));
+      patch.rnpLastNotifyAt = null;
+      patch.rnpNotifyCount = 0;
+      if (lead.assignedTo) patch.rnpLastStaff = lead.assignedTo;
+    } else if (lead.status === 'rnp') {
+      patch.rnpMarkedAt = null;
+      patch.rnpNextCallAt = null;
+      patch.rnpLastNotifyAt = null;
+      patch.rnpNotifyCount = 0;
+    }
+    if (patch.status === 'utc') {
+      if (lead.assignedTo) patch.utcLastStaff = lead.assignedTo;
+    }
   }
   if (patch.assignedTo && String(patch.assignedTo) !== String(lead.assignedTo || '')) {
     const staff = await User.findOne({ _id: patch.assignedTo, isActive: true, deletedAt: null });
@@ -299,6 +389,23 @@ async function update(user, id, body, meta) {
     patch.assignmentDate = new Date();
     patch.bucketStatus = 'assigned';
   }
+  let demoDueAt = null;
+  if (patch.status === 'demo_booked' && patch.status !== lead.status) {
+    if (!body.demoDate || !body.demoTime) {
+      throw new AppError('Choose demo date and time', 422);
+    }
+    demoDueAt = combineLocal(body.demoDate, body.demoTime, general.timezone || 'Asia/Kolkata');
+    if (Number.isNaN(demoDueAt.getTime())) throw new AppError('Invalid demo date or time', 422);
+    if (demoDueAt.getTime() <= Date.now() - 60 * 1000) {
+      throw new AppError('Demo time must be in the future', 422);
+    }
+    patch.followUpAt = demoDueAt;
+    patch.nextActionTitle = 'Upcoming demo';
+    patch.nextActionDueAt = demoDueAt;
+  }
+  delete patch.demoDate;
+  delete patch.demoTime;
+
   const diff = changed(lead.toObject(), patch);
   Object.assign(lead, patch);
   if (patch.tags) lead.tags = patch.tags;
@@ -316,6 +423,44 @@ async function update(user, id, body, meta) {
       description: `Status changed from ${from} to ${to}`,
       oldValue: diff.oldValues.status, newValue: patch.status,
     });
+  }
+  if (demoDueAt && patch.status === 'demo_booked') {
+    await FollowUp.updateMany(
+      { lead: lead._id, isDemo: true, status: 'pending' },
+      { $set: { status: 'cancelled' } },
+    );
+    const assignee = lead.assignedTo || user._id;
+    const followUp = await FollowUp.create({
+      lead: lead._id,
+      leadName: lead.name,
+      leadCode: lead.leadCode,
+      assignedTo: assignee,
+      team: lead.team,
+      branch: lead.branch,
+      title: 'Upcoming demo',
+      description: `Demo booked for ${body.demoDate} ${body.demoTime}`,
+      dueAt: demoDueAt,
+      priority: 'high',
+      createdBy: user._id,
+      isDemo: true,
+    });
+    await addActivity({
+      lead,
+      type: 'followup_created',
+      actor: user,
+      description: `Demo booked for ${demoDueAt.toISOString()}`,
+      newValue: { followUpId: followUp.id, dueAt: demoDueAt, demo: true },
+    });
+    if (String(assignee) !== String(user._id)) {
+      await notify({
+        user: assignee,
+        type: 'demo_booked',
+        title: 'Demo booked',
+        body: `${lead.name} (${lead.leadCode}) · ${body.demoDate} ${body.demoTime}`,
+        module: 'leads',
+        recordId: lead.id,
+      });
+    }
   }
   if (patch.assignedTo && diff.oldValues.assignedTo !== undefined) {
     await LeadAssignment.create({
@@ -449,6 +594,24 @@ async function bulkStatus(user, body, meta) {
   return { data: { status: status.key, results }, message: 'Bulk status update finished' };
 }
 
+async function bulkRemove(user, body, meta) {
+  const results = [];
+  let deleted = 0;
+  for (const id of body.leadIds) {
+    try {
+      const archived = await remove(user, id, meta);
+      deleted += 1;
+      results.push({ id, ok: true, message: archived.message });
+    } catch (error) {
+      results.push({ id, ok: false, message: error.message });
+    }
+  }
+  return {
+    data: { deleted, results },
+    message: deleted ? `Deleted ${deleted} lead${deleted === 1 ? '' : 's'}` : 'No leads were deleted',
+  };
+}
+
 async function rowsForExport(user, query) {
   const filter = await buildLeadFilter(user, query, { bucket: query.view === 'bucket' });
   const rows = await Lead.find(filter).sort(sortFrom(query, LEAD_SORT)).limit(5000)
@@ -462,12 +625,17 @@ async function rowsForExport(user, query) {
     Source: lead.source,
     Status: lead.status,
     Role: lead.leadRole || '',
+    Firm: lead.firm || '',
+    'Consultancy name': lead.consultancyName || '',
     'Assigned staff': lead.assignedTo?.name || '',
     'Expected revenue': lead.expectedRevenue || 0,
     'Next follow-up': lead.followUpAt ? new Date(lead.followUpAt).toISOString() : '',
     'Last contacted': lead.lastContactedAt ? new Date(lead.lastContactedAt).toISOString() : '',
     District: lead.district || '',
     City: lead.city || '',
+    Comment: lead.comment || '',
+    Remark: lead.remarks || '',
+    Notes: lead.notes || '',
   }));
 }
 
@@ -500,6 +668,7 @@ async function assignOne(user, { leadId, toStaff, reason, mode, expectedStaffId,
   }
   const expected = expectedStaffId !== undefined && expectedStaffId !== '' ? expectedStaffId : lead.assignedTo;
   const filter = { _id: lead._id, deletedAt: null, assignedTo: expected || null };
+  const assigningFromBucket = Boolean(staff) && !lead.assignedTo;
   const updated = await Lead.findOneAndUpdate(filter, {
     $set: {
       assignedTo: staff ? staff._id : null,
@@ -507,6 +676,8 @@ async function assignOne(user, { leadId, toStaff, reason, mode, expectedStaffId,
       branch: staff?.branch || lead.branch,
       assignmentDate: staff ? new Date() : lead.assignmentDate,
       bucketStatus: staff ? 'assigned' : 'unassigned',
+      // Fresh assign from bucket stays untouched until that staff changes status.
+      ...(assigningFromBucket ? { status: 'fresh', statusChangedAt: new Date() } : {}),
     },
   }, { new: true, session: session || undefined });
   if (!updated) return { ok: false, conflict: true, message: 'This lead was assigned by someone else' };
@@ -852,7 +1023,14 @@ async function updatePipeline(user, id, body, meta) {
     return { data: presentLead(lead.toObject()), message: 'Marked as not received' };
   }
   if (body.status === 'payment_received') throw new AppError('Enter the payment amount', 422);
-  if (body.status) await update(user, id, { status: body.status, lostReason: body.lostReason || '' }, meta);
+  if (body.status) {
+    await update(user, id, {
+      status: body.status,
+      lostReason: body.lostReason || '',
+      demoDate: body.demoDate,
+      demoTime: body.demoTime,
+    }, meta);
+  }
   const lead = await findInScope(user, id);
   ownLead(user, lead);
   if (!lead.inPipeline) throw new AppError('Add this lead to the pipeline first', 400);
@@ -870,6 +1048,7 @@ async function updatePipeline(user, id, body, meta) {
 async function pipelineReport(user, query) {
   const filter = { deletedAt: null, inPipeline: true };
   if (query.leadRole) filter.leadRole = query.leadRole;
+  if (query.firm) filter.firm = query.firm;
   let selected = null;
   if (user.role === 'STAFF') {
     filter.assignedTo = user._id;
@@ -923,6 +1102,57 @@ async function pipelineReport(user, query) {
   return { data: reports, meta: { view: user.role === 'STAFF' || query.staff ? 'staff' : 'all', staff: people } };
 }
 
+/** Leads staff must dial today: assigned today (Asia/Kolkata) Fresh or due RNP. */
+async function todayCallQueue(user, query = {}) {
+  const timezone = 'Asia/Kolkata';
+  const todayKey = dateKeyOf(new Date(), timezone);
+  const { start, end } = dayBounds(todayKey, timezone);
+  const now = new Date();
+  const { page, limit, skip } = paging(query);
+  const base = {
+    deletedAt: null,
+    assignedTo: clean(query.staff) || { $ne: null },
+    $or: [
+      { status: 'fresh', assignmentDate: { $gte: start, $lt: end } },
+      { status: 'rnp', $or: [{ assignmentDate: { $gte: start, $lt: end } }, { rnpNextCallAt: { $lte: now } }] },
+      { status: 'utc', assignmentDate: { $gte: start, $lt: end } },
+    ],
+  };
+  const filter = await combine(base, leadScope(user));
+
+  const [rows, total, highPriority, rnpDue] = await Promise.all([
+    Lead.find(filter)
+      .sort({ priorityRank: -1, assignmentDate: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate('assignedTo', 'name employeeId role')
+      .populate('team', 'name code')
+      .lean(),
+    Lead.countDocuments(filter),
+    Lead.countDocuments({ ...filter, priority: { $in: ['high', 'urgent'] } }),
+    Lead.countDocuments(await combine({
+      deletedAt: null,
+      assignedTo: clean(query.staff) || { $ne: null },
+      status: 'rnp',
+      $or: [{ assignmentDate: { $gte: start, $lt: end } }, { rnpNextCallAt: { $lte: now } }],
+    }, leadScope(user))),
+  ]);
+
+  return {
+    data: rows.map(presentLead),
+    meta: {
+      ...metaFor(page, limit, total),
+      date: todayKey,
+      timezone,
+      summary: {
+        toCall: total,
+        highPriority,
+        rnpDue,
+      },
+    },
+  };
+}
+
 module.exports = {
   nextLeadCode,
   presentLead,
@@ -935,6 +1165,7 @@ module.exports = {
   timeline,
   involvement,
   bulkStatus,
+  bulkRemove,
   rowsForExport,
   listAssignments,
   assign,
@@ -949,4 +1180,5 @@ module.exports = {
   addToPipeline,
   updatePipeline,
   pipelineReport,
+  todayCallQueue,
 };

@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { Page } from '../components/ui';
 import { messageFrom, useApp } from '../context/AppContext';
 
 export default function NotificationsPage() {
   const { toast, can } = useApp();
+  const navigate = useNavigate();
   const [rows, setRows] = useState([]);
   const [announce, setAnnounce] = useState({ title: '', body: '' });
 
@@ -13,6 +15,17 @@ export default function NotificationsPage() {
 
   const read = async (id) => {
     await api.post(`/api/v1/notifications/${id}/read`);
+    load();
+  };
+
+  const openRow = async (row) => {
+    if (!row.readAt) {
+      try { await api.post(`/api/v1/notifications/${row._id}/read`); } catch (_) { /* ignore */ }
+    }
+    if (row.module === 'leads' && row.recordId) {
+      navigate(`/leads/${row.recordId}`);
+      return;
+    }
     load();
   };
 
@@ -27,7 +40,7 @@ export default function NotificationsPage() {
   };
 
   return (
-    <Page title="Notifications" subtitle="Assignments, follow-ups, swaps, targets and announcements." actions={<button className="btn secondary" type="button" onClick={() => api.post('/api/v1/notifications/read-all').then(load)}>Mark all read</button>}>
+    <Page title="Notifications" subtitle="Assignments, RNP recalls, follow-ups, swaps, targets and announcements." actions={<button className="btn secondary" type="button" onClick={() => api.post('/api/v1/notifications/read-all').then(load)}>Mark all read</button>}>
       {can('notifications.manage') && (
         <form className="card" onSubmit={send} style={{ marginBottom: 14 }}>
           <h3>Announcement</h3>
@@ -37,11 +50,11 @@ export default function NotificationsPage() {
         </form>
       )}
       {rows.map((row) => (
-        <article key={row._id} className="card" style={{ marginBottom: 8, opacity: row.readAt ? 0.7 : 1 }}>
+        <article key={row._id} className="card" style={{ marginBottom: 8, opacity: row.readAt ? 0.7 : 1, cursor: 'pointer' }} onClick={() => openRow(row)}>
           <strong>{row.title}</strong>
           <p>{row.body}</p>
           <div className="muted">{new Date(row.createdAt).toLocaleString()} · {row.type}</div>
-          {row.readAt ? null : <button className="btn ghost" type="button" onClick={() => read(row._id)}>Mark read</button>}
+          {row.readAt ? null : <button className="btn ghost" type="button" onClick={(event) => { event.stopPropagation(); read(row._id); }}>Mark read</button>}
         </article>
       ))}
     </Page>

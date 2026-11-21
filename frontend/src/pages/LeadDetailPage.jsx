@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { MessageCircle, Phone } from 'lucide-react';
 import api from '../api/client';
-import { Field, Page, SkeletonRows, StatusBadge, LEAD_STATUS_COLORS, day, duration, money } from '../components/ui';
+import DemoScheduleModal from '../components/DemoScheduleModal';
+import { Field, FirmBadge, PriorityBadge, Page, SkeletonRows, StatusBadge, LEAD_STATUS_COLORS, day, duration, money } from '../components/ui';
 import { messageFrom, useApp } from '../context/AppContext';
 
 export default function LeadDetailPage() {
@@ -14,6 +15,7 @@ export default function LeadDetailPage() {
   const [people, setPeople] = useState(null);
   const [statuses, setStatuses] = useState([]);
   const [leadRoles, setLeadRoles] = useState([]);
+  const [leadFirms, setLeadFirms] = useState([]);
   const [note, setNote] = useState('');
   const [calls, setCalls] = useState([]);
   const [callSheet, setCallSheet] = useState(null);
@@ -23,6 +25,9 @@ export default function LeadDetailPage() {
   const [nextAction, setNextAction] = useState({ title: '', date: '', time: '' });
   const [editingContact, setEditingContact] = useState(false);
   const [contact, setContact] = useState({ name: '', phone: '' });
+  const [expectedCash, setExpectedCash] = useState('');
+  const [savingCash, setSavingCash] = useState(false);
+  const [demoPrompt, setDemoPrompt] = useState(null);
 
   const load = () => {
     Promise.all([
@@ -37,8 +42,10 @@ export default function LeadDetailPage() {
       setPeople(peopleRes.data.data);
       setStatuses(metaRes.data.data.statuses);
       setLeadRoles(metaRes.data.data.leadRoles || []);
+      setLeadFirms(metaRes.data.data.leadFirms || []);
       setCalls(callRes.data.data || []);
       setNextAction({ title: leadRes.data.data.nextActionTitle || '', date: '', time: '' });
+      setExpectedCash(String(leadRes.data.data.expectedRevenue ?? 0));
     }).catch((error) => toast(messageFrom(error), 'error'));
   };
 
@@ -46,12 +53,11 @@ export default function LeadDetailPage() {
 
   if (!lead) return <SkeletonRows />;
 
-  const changeStatus = async (status) => {
-    if (status === lead.status) return;
-    let lostReason = lead.lostReason || '';
-    if (['lost', 'not_interested', 'disqualified'].includes(status)) {
-      lostReason = window.prompt('Why was this lead lost?', lostReason) || '';
-      if (!lostReason) return;
+  const applyStatus = async (status, extra = {}) => {
+    let lostReason = extra.lostReason ?? lead.lostReason ?? '';
+    if (['lost', 'not_interested', 'disqualified'].includes(status) && !lostReason) {
+      lostReason = window.prompt('Why was this lead lost?', lead.lostReason || '') || '';
+      if (!lostReason) return false;
     }
     const add = !lead.inPipeline && await confirm({
       title: 'Add to pipeline?',
@@ -60,11 +66,26 @@ export default function LeadDetailPage() {
       cancelLabel: 'No',
     });
     try {
-      await api.patch(`/api/v1/leads/${id}`, { status, lostReason });
+      await api.patch(`/api/v1/leads/${id}`, { status, lostReason, ...extra });
       if (add) await api.post(`/api/v1/leads/${id}/pipeline`);
-      toast(add ? 'Status updated and added to pipeline' : 'Status updated');
+      toast(status === 'demo_booked'
+        ? 'Demo booked · added to Follow-ups'
+        : (add ? 'Status updated and added to pipeline' : 'Status updated'));
       load();
-    } catch (error) { toast(messageFrom(error), 'error'); }
+      return true;
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+      return false;
+    }
+  };
+
+  const changeStatus = async (status) => {
+    if (status === lead.status) return;
+    if (status === 'demo_booked') {
+      setDemoPrompt({ status });
+      return;
+    }
+    await applyStatus(status);
   };
 
   const addNote = async (event) => {
@@ -75,6 +96,25 @@ export default function LeadDetailPage() {
       toast('Note added');
       load();
     } catch (error) { toast(messageFrom(error), 'error'); }
+  };
+
+  const saveExpectedCash = async (event) => {
+    event.preventDefault();
+    const amount = Number(expectedCash);
+    if (!Number.isFinite(amount) || amount < 0) {
+      toast('Enter a valid expected cash amount', 'error');
+      return;
+    }
+    setSavingCash(true);
+    try {
+      await api.patch(`/api/v1/leads/${id}`, { expectedRevenue: amount });
+      toast('Expected cash updated');
+      load();
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+    } finally {
+      setSavingCash(false);
+    }
   };
 
   const addFollowUp = async (event) => {
@@ -176,6 +216,8 @@ export default function LeadDetailPage() {
       <article className="card lead-sheet">
         <div className="lead-sheet-top">
           <StatusBadge status={lead.status} label={statusLabel} />
+          <PriorityBadge priority={lead.priority} />
+          <FirmBadge firm={lead.firm} firms={leadFirms} />
           <span className="muted">{[lead.source, lead.district].filter(Boolean).join(' · ') || 'No source'}</span>
         </div>
         <p className="lead-phone">{lead.phoneDisplay || 'No phone'}</p>
@@ -231,12 +273,39 @@ export default function LeadDetailPage() {
           <div><dt>Follow-up</dt><dd>{day(lead.followUpAt)}</dd></div>
           <div><dt>Last contacted</dt><dd>{day(lead.lastContactedAt)}</dd></div>
           <div><dt>Owner</dt><dd>{lead.assignedTo?.name || 'Unassigned'}</dd></div>
-          <div><dt>Role</dt><dd>{leadRoles.find((role) => role.key === lead.leadRole)?.label || '—'}</dd></div>
+          <div><dt>Client</dt><dd>{leadRoles.find((role) => role.key === lead.leadRole)?.label || '—'}</dd></div>
+          <div><dt>Firm</dt><dd><FirmBadge firm={lead.firm} firms={leadFirms} /></dd></div>
+          <div className="wide"><dt>Consultancy name</dt><dd>{lead.consultancyName || '—'}</dd></div>
           <div className="wide"><dt>Next action</dt><dd>{lead.nextActionTitle || 'None set'}</dd></div>
           <div className="wide"><dt>Expected</dt><dd>{money(lead.expectedRevenue)} <span className="muted">Not collected cash</span></dd></div>
+          {lead.comment ? <div className="wide"><dt>Comment</dt><dd>{lead.comment}</dd></div> : null}
+          {lead.remarks ? <div className="wide"><dt>Remark</dt><dd>{lead.remarks}</dd></div> : null}
         </dl>
         {lead.notes && <p className="lead-note">{lead.notes}</p>}
       </article>
+
+      {can('leads.edit') && (
+        <article className="card lead-block">
+          <h3>Expected cash</h3>
+          <p className="muted">Expected amount for this lead. This is not collected payment.</p>
+          <form onSubmit={saveExpectedCash}>
+            <Field label="Expected cash (₹)">
+              <input
+                type="number"
+                min="0"
+                step="1"
+                aria-label="Expected cash"
+                value={expectedCash}
+                onChange={(event) => setExpectedCash(event.target.value)}
+                required
+              />
+            </Field>
+            <button className="btn lead-wide" type="submit" disabled={savingCash}>
+              {savingCash ? 'Saving…' : 'Save expected cash'}
+            </button>
+          </form>
+        </article>
+      )}
 
       {can('leads.edit') && (
         <article className="card lead-block">
@@ -303,6 +372,17 @@ export default function LeadDetailPage() {
           ))}
         </div>
       </article>
+
+      {demoPrompt && (
+        <DemoScheduleModal
+          leadName={lead.name}
+          onCancel={() => setDemoPrompt(null)}
+          onConfirm={async ({ demoDate, demoTime }) => {
+            const ok = await applyStatus('demo_booked', { demoDate, demoTime });
+            if (ok) setDemoPrompt(null);
+          }}
+        />
+      )}
     </Page>
   );
 }

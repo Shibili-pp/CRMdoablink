@@ -61,6 +61,7 @@ const userSchema = new Schema({
   lastLoginAt: Date,
   workStart: { type: String, default: '' },
   workEnd: { type: String, default: '' },
+  managingClients: { type: [String], default: [] },
   deletedAt: { type: Date, default: null, index: true },
 }, { timestamps: true });
 
@@ -80,8 +81,10 @@ const leadSchema = new Schema({
   country: { type: String, default: 'India' },
   source: { type: String, index: true },
   leadRole: { type: String, default: '', index: true },
+  firm: { type: String, default: '', index: true },
   category: String,
-  priority: { type: String, enum: ['low', 'medium', 'high', 'urgent'], default: 'medium', index: true },
+  priority: { type: String, enum: ['low', 'medium', 'high', 'urgent'], default: 'high', index: true },
+  priorityRank: { type: Number, default: 30, index: true },
   quality: { type: String, enum: ['cold', 'warm', 'hot', ''], default: '' },
   assignedTo: { type: Schema.Types.ObjectId, ref: 'User', index: true, default: null },
   team: { type: Schema.Types.ObjectId, ref: 'Team', index: true, default: null },
@@ -93,12 +96,19 @@ const leadSchema = new Schema({
   lastActivityAt: { type: Date, default: Date.now, index: true },
   status: { type: String, default: 'fresh', index: true },
   statusChangedAt: { type: Date, default: Date.now },
+  rnpMarkedAt: Date,
+  rnpNextCallAt: { type: Date, index: true },
+  rnpLastNotifyAt: Date,
+  rnpNotifyCount: { type: Number, default: 0 },
+  rnpLastStaff: { type: Schema.Types.ObjectId, ref: 'User', index: true, default: null },
+  utcLastStaff: { type: Schema.Types.ObjectId, ref: 'User', index: true, default: null },
   nextActionTitle: String,
   nextActionDueAt: Date,
   expectedRevenue: { type: Number, default: 0 },
   revenueProbability: { type: Number, default: 0 },
   followUpAt: Date,
   notes: String,
+  comment: { type: String, default: '' },
   lostReason: String,
   inPipeline: { type: Boolean, default: false, index: true },
   pipelineAddedAt: Date,
@@ -109,13 +119,38 @@ const leadSchema = new Schema({
   paymentState: { type: String, enum: ['', 'awaiting', 'received', 'returned'], default: '' },
   tags: { type: [String], default: [] },
   bucketStatus: { type: String, enum: ['unassigned', 'assigned'], default: 'unassigned', index: true },
+  fromSheet: { type: Boolean, default: false, index: true },
+  sheetConnection: { type: Schema.Types.ObjectId, ref: 'SheetConnection', index: true },
+  sheetRowKey: { type: String, default: '' },
   importBatch: { type: Schema.Types.ObjectId, ref: 'LeadImport' },
   deletedAt: { type: Date, default: null, index: true },
 }, { timestamps: true });
 leadSchema.index({ deletedAt: 1, assignedTo: 1, status: 1 });
 leadSchema.index({ deletedAt: 1, branch: 1, createdAt: -1 });
 leadSchema.index({ deletedAt: 1, team: 1, status: 1 });
+leadSchema.index({ deletedAt: 1, fromSheet: 1, assignedTo: 1 });
+leadSchema.index({ deletedAt: 1, status: 1, assignedTo: 1, rnpNextCallAt: 1 });
 leadSchema.index({ name: 1 });
+leadSchema.index({ sheetRowKey: 1 }, { unique: true, partialFilterExpression: { sheetRowKey: { $type: 'string', $gt: '' } } });
+
+const sheetConnectionSchema = new Schema({
+  name: { type: String, required: true, trim: true },
+  firm: { type: String, required: true, index: true },
+  sheetUrl: { type: String, required: true },
+  sheetId: { type: String, required: true, index: true },
+  gid: { type: String, default: '0' },
+  mapping: { type: Schema.Types.Mixed, default: {} },
+  leadRole: { type: String, required: true },
+  source: { type: String, required: true },
+  enabled: { type: Boolean, default: true, index: true },
+  lastSyncedAt: Date,
+  lastSyncStatus: { type: String, default: '' },
+  lastSyncMessage: { type: String, default: '' },
+  lastImported: { type: Number, default: 0 },
+  lastSkipped: { type: Number, default: 0 },
+  createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
+  deletedAt: { type: Date, default: null, index: true },
+}, { timestamps: true });
 
 const leadAssignmentSchema = new Schema({
   lead: { type: Schema.Types.ObjectId, ref: 'Lead', required: true, index: true },
@@ -201,9 +236,11 @@ const followUpSchema = new Schema({
   remindReason: String,
   remindedAt: Date,
   remindAt: Date,
-  isDemo: { type: Boolean, default: false },
+  isDemo: { type: Boolean, default: false, index: true },
+  popupDismissedAt: Date,
 }, { timestamps: true });
 followUpSchema.index({ assignedTo: 1, status: 1, dueAt: 1 });
+followUpSchema.index({ assignedTo: 1, isDemo: 1, status: 1, dueAt: 1 });
 
 const callLogSchema = new Schema({
   uniqueKey: { type: String, required: true, unique: true },
@@ -560,4 +597,5 @@ module.exports = {
   PipelineStage: model('PipelineStage', stageSchema),
   AlertRule: model('AlertRule', alertRuleSchema),
   Counter: model('Counter', counterSchema),
+  SheetConnection: model('SheetConnection', sheetConnectionSchema),
 };

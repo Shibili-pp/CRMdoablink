@@ -15,6 +15,7 @@ const query = Joi.object({
   priority: Joi.string().valid(...PRIORITIES, ''),
   staff: objectId.allow(''),
   leadRole: Joi.string().max(60).allow(''),
+  firm: Joi.string().max(60).allow(''),
   team: objectId.allow(''),
   branch: objectId.allow(''),
   district: Joi.string().max(80).allow(''),
@@ -32,8 +33,10 @@ const query = Joi.object({
   callType: Joi.string().valid(...CALL_TYPES, ''),
   dataSource: Joi.string().valid(...DATA_SOURCES, ''),
   matchStatus: Joi.string().max(30).allow(''),
-  bucket: Joi.string().valid('assigned', 'unassigned', 'today', 'upcoming', 'overdue', 'missed', ''),
+  bucket: Joi.string().valid('assigned', 'unassigned', 'rnp', 'utc', 'today', 'upcoming', 'overdue', 'missed', 'demo', ''),
+  section: Joi.string().valid('rnp', 'utc', 'all', ''),
   view: Joi.string().max(30).allow(''),
+  fromSheet: Joi.string().valid('true', 'false', ''),
   touch: Joi.string().valid('untouched', 'worked', ''),
   format: Joi.string().valid('pdf', 'xlsx', 'csv'),
   period: Joi.string().valid('daily', 'weekly', 'monthly'),
@@ -77,6 +80,7 @@ const leadBody = Joi.object({
   country: Joi.string().max(80).allow(''),
   source: Joi.string().max(60).required(),
   leadRole: Joi.string().max(60).allow(''),
+  firm: Joi.string().max(60).required(),
   category: Joi.string().max(80).allow(''),
   priority: Joi.string().valid(...PRIORITIES),
   quality: Joi.string().valid('cold', 'warm', 'hot', '').allow(''),
@@ -90,12 +94,17 @@ const leadBody = Joi.object({
   revenueProbability: Joi.number().min(0).max(100),
   followUpAt: date.allow(null),
   notes: Joi.string().max(4000).allow(''),
+  comment: Joi.string().max(4000).allow(''),
+  consultancyName: Joi.string().max(160).allow(''),
+  remarks: Joi.string().max(4000).allow(''),
   lostReason: Joi.string().max(500).allow(''),
   tags: Joi.array().items(Joi.string().max(40)).max(20),
 });
 
-const leadPatch = leadBody.fork(['name', 'phone', 'source'], (field) => field.optional()).keys({
+const leadPatch = leadBody.fork(['name', 'phone', 'source', 'firm', 'leadRole'], (field) => field.optional()).keys({
   reason: Joi.string().max(300).allow(''),
+  demoDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null),
+  demoTime: Joi.string().pattern(/^\d{2}:\d{2}$/).allow('', null),
 });
 
 const pipelinePatch = Joi.object({
@@ -106,6 +115,8 @@ const pipelinePatch = Joi.object({
   remarks: Joi.string().max(4000).allow(''),
   paymentAmount: Joi.number().min(0),
   paymentAction: Joi.string().valid('submit', 'approve', 'return'),
+  demoDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null),
+  demoTime: Joi.string().pattern(/^\d{2}:\d{2}$/).allow('', null),
 });
 
 module.exports = {
@@ -132,6 +143,7 @@ module.exports = {
     maxLeadAllocation: Joi.number().integer().min(1).max(500),
     workStart: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
     workEnd: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
+    managingClients: Joi.array().items(Joi.string().max(60)).max(20),
   }),
   userPatch: Joi.object({
     name: Joi.string().trim().min(2).max(120),
@@ -150,6 +162,7 @@ module.exports = {
     password: Joi.string().min(7).max(72),
     workStart: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
     workEnd: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
+    managingClients: Joi.array().items(Joi.string().max(60)).max(20),
   }),
   permissions: Joi.object({ permissions: Joi.array().items(Joi.string()).required() }),
   branch: Joi.object({
@@ -179,6 +192,9 @@ module.exports = {
     status: Joi.string().required(),
     lostReason: Joi.string().allow(''),
   }),
+  bulkDelete: Joi.object({
+    leadIds: Joi.array().items(objectId).min(1).max(200).required(),
+  }),
   swapSets: Joi.object({
     staffA: objectId.required(),
     staffB: objectId.required(),
@@ -190,6 +206,9 @@ module.exports = {
     staffId: objectId.allow(null, ''),
     reason: Joi.string().max(300).allow(''),
     expectedStaffId: objectId.allow(null, ''),
+  }),
+  assignAllow: Joi.object({
+    presentStaffIds: Joi.array().items(objectId).min(1).max(500).required(),
   }),
   distribute: Joi.object({
     leadIds: Joi.array().items(objectId).min(1).max(200).required(),
@@ -215,11 +234,14 @@ module.exports = {
     skipDuplicates: Joi.boolean(),
     updateExisting: Joi.boolean(),
     leadRole: Joi.string().max(60).required(),
+    firm: Joi.string().max(60).required(),
     source: Joi.string().trim().min(2).max(80).required(),
   }),
   leadSourceParam: Joi.object({ name: Joi.string().trim().min(2).max(80).required() }),
   leadRoleBody: Joi.object({ label: Joi.string().trim().min(2).max(80).required() }),
   leadRoleParam: Joi.object({ key: Joi.string().max(60).required() }),
+  leadFirmBody: Joi.object({ label: Joi.string().trim().min(2).max(80).required() }),
+  leadFirmParam: Joi.object({ key: Joi.string().max(60).required() }),
   followUp: Joi.object({
     leadId: objectId.required(),
     title: Joi.string().trim().min(2).max(160).required(),
@@ -229,6 +251,7 @@ module.exports = {
     dueAt: date,
     priority: Joi.string().valid(...PRIORITIES),
     assignedTo: objectId.allow(null, ''),
+    isDemo: Joi.boolean(),
   }),
   followUpPatch: Joi.object({
     title: Joi.string().trim().min(2).max(160),
@@ -456,5 +479,25 @@ module.exports = {
   leaveReview: Joi.object({
     status: Joi.string().valid('approved', 'rejected').required(),
     reviewNote: Joi.string().allow(''),
+  }),
+  sheetPreview: Joi.object({
+    sheetUrl: Joi.string().uri().required(),
+  }),
+  sheetCreate: Joi.object({
+    name: Joi.string().trim().min(2).max(120).required(),
+    firm: Joi.string().max(60).required(),
+    sheetUrl: Joi.string().uri().required(),
+    mapping: Joi.object().pattern(Joi.string(), Joi.string().allow('')).required(),
+    leadRole: Joi.string().max(60).required(),
+    source: Joi.string().trim().min(2).max(80).required(),
+    enabled: Joi.boolean(),
+  }),
+  sheetPatch: Joi.object({
+    name: Joi.string().trim().min(2).max(120),
+    sheetUrl: Joi.string().uri(),
+    mapping: Joi.object().pattern(Joi.string(), Joi.string().allow('')),
+    leadRole: Joi.string().max(60),
+    source: Joi.string().trim().min(2).max(80),
+    enabled: Joi.boolean(),
   }),
 };

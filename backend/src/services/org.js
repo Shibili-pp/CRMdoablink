@@ -6,10 +6,20 @@ const { AppError, paging, metaFor, escapeRegex, sortFrom } = require('../utils/h
 const { normalizePhone, isValidPhone } = require('../utils/phone');
 const { recordAudit } = require('./audit');
 const { notify } = require('./notify');
-const { roleTemplate } = require('./settings');
+const { roleTemplate, getLeadRoles, getGeneral } = require('./settings');
 const { canManageRole, staffScope, combine, isElevated, hasPermission } = require('./access');
 const { publicUser } = require('./auth');
-const { getGeneral } = require('./settings');
+
+async function resolveManagingClients(keys) {
+  if (keys == null) return undefined;
+  const list = Array.isArray(keys) ? keys : [];
+  const allowed = await getLeadRoles();
+  const allowedKeys = new Set(allowed.map((item) => item.key));
+  const next = [...new Set(list.map((key) => String(key || '').trim()).filter(Boolean))];
+  const invalid = next.filter((key) => !allowedKeys.has(key));
+  if (invalid.length) throw new AppError('Choose managing clients from the preset list', 422);
+  return next;
+}
 
 function workClock(value, fallback) {
   if (value == null || value === '') return fallback;
@@ -64,7 +74,10 @@ async function getUser(actor, id) {
 }
 
 async function createUser(actor, body, meta) {
-  if (!canManageRole(actor.role, body.role)) {
+  // Temporary: allow Owner / Super Admin creation so a proper Owner account can be set up. Tighten later.
+  const canCreateTopRole = ['OWNER', 'SUPER_ADMIN'].includes(body.role)
+    && ['OWNER', 'SUPER_ADMIN', 'ADMIN'].includes(actor.role);
+  if (!canManageRole(actor.role, body.role) && !canCreateTopRole) {
     throw new AppError('You can only create users below your role', 403);
   }
   const general = await getGeneral();
@@ -91,6 +104,7 @@ async function createUser(actor, body, meta) {
   const workStart = workClock(body.workStart, '11:00');
   const workEnd = workClock(body.workEnd, '20:00');
   assertShift(workStart, workEnd);
+  const managingClients = await resolveManagingClients(body.managingClients || []);
   const user = await User.create({
     username,
     email,
@@ -112,10 +126,11 @@ async function createUser(actor, body, meta) {
     maxLeadAllocation: body.maxLeadAllocation || 50,
     workStart,
     workEnd,
+    managingClients,
   });
   await recordAudit({
     user: actor._id, username: actor.username, action: 'user.create', module: 'users', recordId: user.id,
-    newValues: { username: user.username, role: user.role, team, branch }, ...meta,
+    newValues: { username: user.username, role: user.role, team, branch, managingClients }, ...meta,
   });
   return { data: publicUser(user), message: 'User created', status: 201 };
 }
@@ -173,6 +188,9 @@ async function updateUser(actor, id, body, meta) {
     assertShift(start, end);
     user.workStart = start;
     user.workEnd = end;
+  }
+  if (body.managingClients !== undefined) {
+    user.managingClients = await resolveManagingClients(body.managingClients);
   }
   await user.save();
   await recordAudit({

@@ -9,18 +9,39 @@ const fallbackFields = [
   { key: 'alternatePhone', label: 'Alternate phone' },
   { key: 'email', label: 'Email' },
   { key: 'company', label: 'Company' },
+  { key: 'consultancyName', label: 'Consultancy name' },
   { key: 'district', label: 'District' },
   { key: 'city', label: 'City' },
   { key: 'state', label: 'State' },
   { key: 'country', label: 'Country' },
+  { key: 'status', label: 'Status (Excel: Stage)' },
   { key: 'priority', label: 'Priority' },
   { key: 'expectedRevenue', label: 'Expected revenue' },
   { key: 'notes', label: 'Notes' },
+  { key: 'comment', label: 'Comment' },
+  { key: 'remarks', label: 'Remark' },
 ];
 
 function columnLabel(column) {
   const sample = column.sample ? ` · ${column.sample}` : '';
   return `Column ${column.letter} (${column.number}) — ${column.header}${sample}`;
+}
+
+function isDuplicateRow(row) {
+  return Boolean(row.duplicateInFile || row.duplicateLeadId || row.duplicateLeadCode);
+}
+
+function duplicateReason(row) {
+  if (row.duplicateLeadCode || row.duplicateLeadId) {
+    const code = row.duplicateLeadCode || 'existing lead';
+    const name = row.duplicateLeadName ? ` · ${row.duplicateLeadName}` : '';
+    const who = row.duplicateAssignedTo
+      ? ` · assigned to ${row.duplicateAssignedTo}`
+      : ' · in bucket';
+    return `Already in CRM · ${code}${name}${who}`;
+  }
+  if (row.duplicateInFile) return 'Duplicate in this file';
+  return 'Duplicate';
 }
 
 export default function LeadUpload({ onImported }) {
@@ -32,6 +53,8 @@ export default function LeadUpload({ onImported }) {
   const [fields, setFields] = useState(fallbackFields);
   const [leadRoles, setLeadRoles] = useState([]);
   const [leadRole, setLeadRole] = useState('');
+  const [leadFirms, setLeadFirms] = useState([]);
+  const [firm, setFirm] = useState('');
   const [sources, setSources] = useState([]);
   const [source, setSource] = useState('');
   const [busy, setBusy] = useState(false);
@@ -39,6 +62,7 @@ export default function LeadUpload({ onImported }) {
   useEffect(() => {
     api.get('/api/v1/meta').then((response) => {
       setLeadRoles(response.data.data.leadRoles || []);
+      setLeadFirms(response.data.data.leadFirms || []);
       setSources(response.data.data.sources || []);
       if (response.data.data.importFields?.length) setFields(response.data.data.importFields.filter((field) => field.key !== 'source'));
     }).catch(() => {});
@@ -49,6 +73,7 @@ export default function LeadUpload({ onImported }) {
     setPreview(null);
     setMapping({});
     setLeadRole('');
+    setFirm('');
     setSource('');
   };
 
@@ -88,22 +113,45 @@ export default function LeadUpload({ onImported }) {
     }
   };
 
+  const removeDuplicates = async () => {
+    if (!preview?._id) return;
+    setBusy(true);
+    try {
+      const response = await api.post(`/api/v1/lead-imports/${preview._id}/remove-duplicates`);
+      setPreview(response.data.data);
+      toast(response.data.message || 'Duplicates removed');
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const commit = async () => {
     if (!mapping.name || !mapping.phone) {
       toast('Choose the column for name and the column for phone', 'error');
       return;
     }
     if (!leadRole) {
-      toast('Choose a role for these leads', 'error');
+      toast('Choose a client type for these leads', 'error');
+      return;
+    }
+    if (!firm) {
+      toast('Choose a firm for these leads', 'error');
       return;
     }
     if (!source) {
       toast('Choose a lead source for these leads', 'error');
       return;
     }
+    const duplicateCount = (preview?.rows || []).filter(isDuplicateRow).length;
+    if (duplicateCount > 0) {
+      toast('Remove duplicates first, then import the remaining leads', 'error');
+      return;
+    }
     setBusy(true);
     try {
-      const response = await api.post(`/api/v1/lead-imports/${preview._id}/commit`, { skipDuplicates: true, updateExisting: false, leadRole, source });
+      const response = await api.post(`/api/v1/lead-imports/${preview._id}/commit`, { skipDuplicates: true, updateExisting: false, leadRole, firm, source });
       toast(`Imported ${response.data.data.summary.imported} leads into the bucket`);
       close();
       onImported?.();
@@ -116,6 +164,10 @@ export default function LeadUpload({ onImported }) {
 
   const columns = preview?.columns || [];
   const used = new Set(Object.values(mapping).filter(Boolean));
+  const rows = preview?.rows || [];
+  const duplicateRows = rows.filter(isDuplicateRow);
+  const readyRows = rows.filter((row) => row.valid && !isDuplicateRow(row));
+  const invalidRows = rows.filter((row) => !row.valid);
 
   return (
     <>
@@ -159,32 +211,78 @@ export default function LeadUpload({ onImported }) {
                   ))}
                 </tbody>
               </table>
-              <div className="cluster" style={{ margin: '12px 0' }}>
-                <Badge>{preview.summary?.total || 0} rows</Badge>
-                <Badge tone="success">{preview.summary?.valid || 0} ready</Badge>
-                <Badge tone="warning">{preview.summary?.duplicates || 0} duplicates</Badge>
-                <Badge tone="danger">{preview.summary?.invalid || 0} need a fix</Badge>
-              </div>
-              <div className="table-wrap">
-                <table>
-                  <thead><tr><th>Row</th><th>Name</th><th>Phone</th><th>Result</th></tr></thead>
-                  <tbody>
-                    {(preview.rows || []).slice(0, 8).map((row) => (
-                      <tr key={row.rowNumber}>
-                        <td>{row.rowNumber}</td>
-                        <td>{row.mapped?.name || '—'}</td>
-                        <td>{row.mapped?.phone || '—'}</td>
-                        <td>{row.valid ? (row.duplicateInFile || row.duplicateLeadCode ? `Duplicate ${row.duplicateLeadCode || 'in file'}` : 'Ready') : (row.rowErrors || []).join(', ')}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+
+              <section className="import-review" style={{ marginTop: 16 }}>
+                <h3>Review</h3>
+                <p className="muted">All mapped rows are listed below. Fix mapping if needed, remove duplicates, then import the remaining leads.</p>
+                <div className="cluster" style={{ margin: '12px 0' }}>
+                  <Badge>{preview.summary?.total || rows.length} total</Badge>
+                  <Badge tone="success">{readyRows.length} ready</Badge>
+                  <Badge tone="warning">{duplicateRows.length} duplicates</Badge>
+                  <Badge tone="danger">{invalidRows.length} need a fix</Badge>
+                </div>
+
+                <div className="table-wrap">
+                  <table>
+                    <thead><tr><th>Row</th><th>Name</th><th>Phone</th><th>Result</th></tr></thead>
+                    <tbody>
+                      {rows.slice(0, 40).map((row) => (
+                        <tr key={row.rowNumber}>
+                          <td>{row.rowNumber}</td>
+                          <td>{row.mapped?.name || '—'}</td>
+                          <td>{row.mapped?.phone || '—'}</td>
+                          <td>
+                            {!row.valid
+                              ? (row.rowErrors || []).join(', ')
+                              : isDuplicateRow(row)
+                                ? duplicateReason(row)
+                                : 'Ready'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {rows.length > 40 && <p className="muted">Showing first 40 of {rows.length} rows.</p>}
+
+                {duplicateRows.length > 0 && (
+                  <article className="card lead-block" style={{ marginTop: 12 }}>
+                    <h3>Duplicate leads ({duplicateRows.length})</h3>
+                    <p className="muted">Checked against all leads in the database (bucket and already assigned). Remove them before importing.</p>
+                    <div className="table-wrap">
+                      <table>
+                        <thead><tr><th>Row</th><th>Name</th><th>Phone</th><th>Why</th></tr></thead>
+                        <tbody>
+                          {duplicateRows.slice(0, 30).map((row) => (
+                            <tr key={`dup-${row.rowNumber}`}>
+                              <td>{row.rowNumber}</td>
+                              <td>{row.mapped?.name || '—'}</td>
+                              <td>{row.mapped?.phone || '—'}</td>
+                              <td>{duplicateReason(row)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {duplicateRows.length > 30 && <p className="muted">Showing first 30 of {duplicateRows.length} duplicates.</p>}
+                    <button className="btn secondary" type="button" style={{ marginTop: 12 }} disabled={busy} onClick={removeDuplicates}>
+                      Remove duplicates
+                    </button>
+                  </article>
+                )}
+              </section>
+
               <div style={{ marginTop: 12 }}>
-                <Field label="Role for every row in this file">
-                  <select aria-label="Upload role" value={leadRole} onChange={(event) => setLeadRole(event.target.value)} required>
+                <Field label="Client type for every row in this file">
+                  <select aria-label="Upload client type" value={leadRole} onChange={(event) => setLeadRole(event.target.value)} required>
                     <option value="">Choose</option>
                     {leadRoles.map((role) => <option key={role.key} value={role.key}>{role.label}</option>)}
+                  </select>
+                </Field>
+                <Field label="Firm for every row in this file">
+                  <select aria-label="Upload firm" value={firm} onChange={(event) => setFirm(event.target.value)} required>
+                    <option value="">Choose</option>
+                    {leadFirms.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
                   </select>
                 </Field>
                 <Field label="Lead source for every row in this file">
@@ -193,7 +291,15 @@ export default function LeadUpload({ onImported }) {
                     {sources.map((item) => <option key={item}>{item}</option>)}
                   </select>
                 </Field>
-                <button className="btn" type="button" style={{ marginTop: 12 }} disabled={busy} onClick={commit}>Import into the bucket</button>
+                <button
+                  className="btn"
+                  type="button"
+                  style={{ marginTop: 12 }}
+                  disabled={busy || !readyRows.length || duplicateRows.length > 0}
+                  onClick={commit}
+                >
+                  {duplicateRows.length > 0 ? 'Remove duplicates to continue' : `Import ${readyRows.length} lead${readyRows.length === 1 ? '' : 's'} into the bucket`}
+                </button>
               </div>
             </>
           )}

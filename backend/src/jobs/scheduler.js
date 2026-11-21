@@ -4,6 +4,10 @@ const { processReminders } = require('../services/followups');
 const { scan } = require('../services/alerts');
 const { generateForStaff } = require('../services/hourly');
 const { getGeneral } = require('../services/settings');
+const { syncAllEnabled } = require('../services/sheets');
+const { autoAssignSheetLeads } = require('../services/autoAssign');
+const { processRnpReminders, moveRnpToBucketAfterWork } = require('../services/rnp');
+const { moveUtcToBucketAfterWork } = require('../services/utc');
 const { zonedParts, dateKeyFromDate, addCalendarDays } = require('../utils/time');
 
 function startJobs() {
@@ -12,8 +16,31 @@ function startJobs() {
     try {
       await processReminders();
       await scan();
+      const rnp = await processRnpReminders();
+      if (rnp.notified) console.log(`RNP reminders: ${rnp.notified}`);
+      const moved = await moveRnpToBucketAfterWork();
+      if (moved.moved) console.log(`RNP to bucket: ${moved.moved}`);
+      const utcMoved = await moveUtcToBucketAfterWork();
+      if (utcMoved.moved) console.log(`UTC to bucket: ${utcMoved.moved}`);
     } catch (error) {
       console.error('Reminder job failed:', error.message);
+    }
+  });
+  cron.schedule('*/3 * * * *', async () => {
+    try {
+      await syncAllEnabled();
+    } catch (error) {
+      console.error('Google Sheet sync failed:', error.message);
+    }
+  });
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      // After Owner/SA allow today: only continuous sheet leads to present staff (no re-permission).
+      const sheet = await autoAssignSheetLeads({ requireAllow: true });
+      if (sheet.assigned) console.log(`Continuous sheet assign: ${sheet.assigned}`);
+      else if (sheet.blocked) { /* awaiting allow */ }
+    } catch (error) {
+      console.error('Auto-assign job failed:', error.message);
     }
   });
   cron.schedule('5 * * * *', async () => {
