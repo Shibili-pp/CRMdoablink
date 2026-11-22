@@ -2,14 +2,157 @@ const { Lead, User, SystemSetting } = require('../models');
 const { AppError } = require('../utils/http');
 const { getGeneral } = require('./settings');
 const { staffOnLeave } = require('./org');
-const { dateKeyFromDate, dayBounds } = require('../utils/time');
+const { dateKeyFromDate, dayBounds, weekdayIndex } = require('../utils/time');
 const { DAILY_ASSIGN_SHARES } = require('../config/constants');
+const { autoCapacityByStaff } = require('./dailyCapacity');
 const autoAssign = require('./autoAssign');
 
 const SETTING_KEY = 'dailyAssignAllow';
+const MASTER_KEY = 'autoAssignEnabled';
+const SYSTEM_ACTOR = { id: 'system', name: 'System', role: 'SYSTEM' };
 
 async function getAllowDoc() {
   return SystemSetting.findOne({ key: SETTING_KEY }).lean();
+}
+
+function presentMaster(value = {}, weekday = null) {
+  const sundayOff = weekday === 0;
+  const resumeMonday = Boolean(value.resumeAfterSunday) && sundayOff;
+  return {
+    enabled: Boolean(value.enabled),
+    resumeAfterSunday: Boolean(value.resumeAfterSunday),
+    sundayOff,
+    resumeMonday,
+    weekday,
+    sundayForcedOffAt: value.sundayForcedOffAt || null,
+    mondayRestoredAt: value.mondayRestoredAt || null,
+    updatedAt: value.updatedAt || null,
+    updatedBy: value.updatedBy || null,
+  };
+}
+
+/**
+ * Sunday is not a working day: force Auto-assign OFF and remember to restore Monday
+ * if it was ON. Monday restores ON when resumeAfterSunday is set.
+ */
+async function applyWeekendAutoAssignRule(timeZone) {
+  const general = timeZone ? { timezone: timeZone } : await getGeneral();
+  const tz = general.timezone || 'Asia/Kolkata';
+  const now = new Date();
+  const weekday = weekdayIndex(now, tz);
+  const doc = await SystemSetting.findOne({ key: MASTER_KEY });
+  const prev = doc?.value || {};
+  let value = {
+    enabled: Boolean(prev.enabled),
+    resumeAfterSunday: Boolean(prev.resumeAfterSunday),
+    sundayForcedOffAt: prev.sundayForcedOffAt || null,
+    mondayRestoredAt: prev.mondayRestoredAt || null,
+    updatedAt: prev.updatedAt || null,
+    updatedBy: prev.updatedBy || null,
+  };
+  let changed = false;
+
+  if (weekday === 0) {
+    if (value.enabled) {
+      value.resumeAfterSunday = true;
+      value.enabled = false;
+      value.sundayForcedOffAt = now.toISOString();
+      value.updatedAt = now.toISOString();
+      value.updatedBy = SYSTEM_ACTOR;
+      changed = true;
+    }
+  } else if (weekday === 1 && value.resumeAfterSunday) {
+    value.enabled = true;
+    value.resumeAfterSunday = false;
+    value.mondayRestoredAt = now.toISOString();
+    value.updatedAt = now.toISOString();
+    value.updatedBy = SYSTEM_ACTOR;
+    changed = true;
+  }
+
+  if (changed) {
+    await SystemSetting.updateOne(
+      { key: MASTER_KEY },
+      { key: MASTER_KEY, value },
+      { upsert: true },
+    );
+  }
+
+  return presentMaster(value, weekday);
+}
+
+/** Master switch for Owner/SA. Default OFF — no auto-assign until turned on. Sunday always OFF. */
+async function isAutoAssignOn() {
+  const master = await applyWeekendAutoAssignRule();
+  return Boolean(master.enabled);
+}
+
+async function getAutoAssignMaster() {
+  return applyWeekendAutoAssignRule();
+}
+
+async function setAutoAssignMaster(user, enabled) {
+  if (!['OWNER', 'SUPER_ADMIN'].includes(user.role)) {
+    throw new AppError('Only Owner or Super Admin can change auto-assign', 403);
+  }
+  const general = await getGeneral();
+  const tz = general.timezone || 'Asia/Kolkata';
+  const now = new Date();
+  const weekday = weekdayIndex(now, tz);
+  const wantOn = Boolean(enabled);
+  const doc = await SystemSetting.findOne({ key: MASTER_KEY }).lean();
+  const prev = doc?.value || {};
+
+  let value;
+  let message;
+
+  if (weekday === 0) {
+    // Sunday never runs; ON means resume Monday.
+    if (wantOn) {
+      value = {
+        enabled: false,
+        resumeAfterSunday: true,
+        sundayForcedOffAt: prev.sundayForcedOffAt || now.toISOString(),
+        mondayRestoredAt: prev.mondayRestoredAt || null,
+        updatedAt: now.toISOString(),
+        updatedBy: { id: String(user._id), name: user.name, role: user.role },
+      };
+      message = 'Sunday is off (not a working day). Auto-assigning will turn ON automatically on Monday.';
+    } else {
+      value = {
+        enabled: false,
+        resumeAfterSunday: false,
+        sundayForcedOffAt: prev.sundayForcedOffAt || null,
+        mondayRestoredAt: prev.mondayRestoredAt || null,
+        updatedAt: now.toISOString(),
+        updatedBy: { id: String(user._id), name: user.name, role: user.role },
+      };
+      message = 'Auto-assigning is OFF for Sunday. It will stay OFF on Monday unless you turn it ON.';
+    }
+  } else {
+    value = {
+      enabled: wantOn,
+      resumeAfterSunday: false,
+      sundayForcedOffAt: prev.sundayForcedOffAt || null,
+      mondayRestoredAt: prev.mondayRestoredAt || null,
+      updatedAt: now.toISOString(),
+      updatedBy: { id: String(user._id), name: user.name, role: user.role },
+    };
+    message = wantOn
+      ? 'Auto-assigning is ON. Use Allow assigning to mark present staff and run today’s mix.'
+      : 'Auto-assigning is OFF. No sheet / RNP / UTC / unassigned auto-assign until you turn it ON.';
+  }
+
+  await SystemSetting.updateOne(
+    { key: MASTER_KEY },
+    { key: MASTER_KEY, value, updatedBy: user._id },
+    { upsert: true },
+  );
+
+  return {
+    data: presentMaster(value, weekday),
+    message,
+  };
 }
 
 async function getTodayAllow(timeZone) {
@@ -111,7 +254,7 @@ async function bucketCounts() {
   };
 }
 
-function planCategory(roleCounts, present, shareOfBalance, sheetTodayByStaff, alreadyByStaff, dailyTarget) {
+function planCategory(roleCounts, present, shareOfBalance, remainingByStaff, alreadyByStaff, dailyTarget) {
   const plan = new Map(present.map((person) => [person.id, 0]));
   const roles = [...roleCounts.keys()];
   roles.forEach((leadRole) => {
@@ -123,7 +266,7 @@ function planCategory(roleCounts, present, shareOfBalance, sheetTodayByStaff, al
     let remaining = total;
     if (shareOfBalance != null) {
       const caps = eligible.map((person) => {
-        const balance = Math.max(0, dailyTarget - (sheetTodayByStaff.get(person.id) || 0));
+        const balance = Math.max(0, remainingByStaff.get(person.id) ?? dailyTarget);
         const cap = Math.floor(balance * shareOfBalance);
         const already = alreadyByStaff.get(person.id) || 0;
         return Math.max(0, cap - already);
@@ -196,12 +339,17 @@ async function preview(user) {
       : person.presentDefault
   ));
   const presentIds = presentForPlan.map((person) => person.id);
-  const sheetToday = await todaySheetCountsByStaff(presentIds, timeZone, now);
+  const capacity = await autoCapacityByStaff(presentIds, timeZone, now);
 
-  const sheetPlan = planCategory(buckets.sheet, presentForPlan, null, sheetToday, new Map(), dailyTarget);
-  const rnpPlan = planCategory(buckets.rnp, presentForPlan, DAILY_ASSIGN_SHARES.rnp, sheetToday, new Map(), dailyTarget);
-  const utcPlan = planCategory(buckets.utc, presentForPlan, DAILY_ASSIGN_SHARES.utc, sheetToday, new Map(), dailyTarget);
-  const bulkPlan = planCategory(buckets.bulk, presentForPlan, DAILY_ASSIGN_SHARES.bulkUnassigned, sheetToday, new Map(), dailyTarget);
+  const sheetPlanRaw = planCategory(buckets.sheet, presentForPlan, null, capacity.remaining, new Map(), dailyTarget);
+  const sheetPlan = new Map();
+  presentForPlan.forEach((person) => {
+    const left = capacity.remaining.get(person.id) || 0;
+    sheetPlan.set(person.id, Math.min(sheetPlanRaw.get(person.id) || 0, left));
+  });
+  const rnpPlan = planCategory(buckets.rnp, presentForPlan, DAILY_ASSIGN_SHARES.rnp, capacity.remaining, new Map(), dailyTarget);
+  const utcPlan = planCategory(buckets.utc, presentForPlan, DAILY_ASSIGN_SHARES.utc, capacity.remaining, new Map(), dailyTarget);
+  const bulkPlan = planCategory(buckets.bulk, presentForPlan, DAILY_ASSIGN_SHARES.bulkUnassigned, capacity.remaining, new Map(), dailyTarget);
 
   const rows = staff.map((person) => ({
     ...person,
@@ -212,12 +360,16 @@ async function preview(user) {
       utc: utcPlan.get(person.id) || 0,
       bulk: bulkPlan.get(person.id) || 0,
     },
-    sheetAssignedToday: sheetToday.get(person.id) || 0,
+    sheetAssignedToday: capacity.sheet.get(person.id) || 0,
+    carryFresh: capacity.carryFresh.get(person.id) || 0,
+    autoRemaining: capacity.remaining.get(person.id) || 0,
   }));
 
+  const master = await getAutoAssignMaster();
   return {
     data: {
       allow,
+      master,
       buckets: {
         sheet: buckets.sheetTotal,
         rnp: buckets.rnpTotal,
@@ -233,6 +385,9 @@ async function preview(user) {
 async function allowAndAssign(user, body = {}) {
   if (!['OWNER', 'SUPER_ADMIN'].includes(user.role)) {
     throw new AppError('Only Owner or Super Admin can allow assigning', 403);
+  }
+  if (!(await isAutoAssignOn())) {
+    throw new AppError('Turn Auto-assign ON in the side menu first', 422);
   }
   const general = await getGeneral();
   const timeZone = general.timezone || 'Asia/Kolkata';
@@ -288,11 +443,16 @@ async function allowAndAssign(user, body = {}) {
 }
 
 async function status() {
-  return { data: await getTodayAllow() };
+  const [allow, master] = await Promise.all([getTodayAllow(), getAutoAssignMaster()]);
+  return { data: { ...allow, master } };
 }
 
 module.exports = {
   getTodayAllow,
+  getAutoAssignMaster,
+  isAutoAssignOn,
+  setAutoAssignMaster,
+  applyWeekendAutoAssignRule,
   preview,
   allowAndAssign,
   status,

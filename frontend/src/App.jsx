@@ -16,6 +16,7 @@ import HourlyPage from './pages/HourlyPage';
 import ImportPage from './pages/ImportPage';
 import LeadDetailPage from './pages/LeadDetailPage';
 import LeaderboardPage from './pages/LeaderboardPage';
+import AllLeadsPage from './pages/AllLeadsPage';
 import LeadsPage from './pages/LeadsPage';
 import PipelinePage from './pages/PipelinePage';
 import LoginPage from './pages/LoginPage';
@@ -52,6 +53,7 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route element={<Guard />}>
         <Route path="/" element={<Permit permission="dashboard.view"><DashboardPage /></Permit>} />
+        <Route path="/all-leads" element={<Permit roles={['OWNER', 'SUPER_ADMIN']}><AllLeadsPage /></Permit>} />
         <Route path="/leads" element={<Permit permission="leads.view"><LeadsPage /></Permit>} />
         <Route path="/pipeline" element={<Permit permission="leads.view"><PipelinePage /></Permit>} />
         <Route path="/leads/import" element={<Permit permission="leads.import"><ImportPage /></Permit>} />

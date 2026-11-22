@@ -210,6 +210,9 @@ module.exports = {
   assignAllow: Joi.object({
     presentStaffIds: Joi.array().items(objectId).min(1).max(500).required(),
   }),
+  autoAssignMaster: Joi.object({
+    enabled: Joi.boolean().required(),
+  }),
   distribute: Joi.object({
     leadIds: Joi.array().items(objectId).min(1).max(200).required(),
     mode: Joi.string().valid('round_robin', 'equal_workload', 'capacity', 'team').required(),

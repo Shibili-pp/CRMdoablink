@@ -254,7 +254,7 @@ export default function BucketPage() {
       )}
       <section className="lead-section" aria-label="New lead from sheet">
         <h2>New lead from sheet{sheetTotal == null ? '' : ` (${sheetTotal})`}</h2>
-        <p className="muted">Highest priority. Owner/Super Admin must Allow assigning (present staff) each morning. Then sheet + RNP 30% + UTC 15% + Unassigned 40% run for present staff; new sheet leads later that day auto-share to them. Absent staff get none. 15% stays for TL+ manual reassign.</p>
+        <p className="muted">Highest priority. Owner/Super Admin turns Auto assigning ON, then Allow assigning. Auto mix fills only remaining of 120 after today’s sheet + carry-over fresh (manual can go above 120). Fresh stays 2 days; if still fresh → UTC bucket for reassign. RNP/UTC change → next-day rotate. 15% stays for TL+ manual.</p>
       </section>
       <DataTable
         className="lead-book"
@@ -265,7 +265,7 @@ export default function BucketPage() {
       />
       <section className="lead-section" aria-label="RNP leads" style={{ marginTop: 18 }}>
         <h2>RNP{rnpTotal == null ? '' : ` (${rnpTotal})`}</h2>
-        <p className="muted">After work end / 20:00, RNP returns here. Next work start rotates A→B→C (matching client). Quota: 30% of (120 − today’s sheet leads).</p>
+        <p className="muted">After work end / 20:00, RNP returns here. Next work start rotates A→B→C; the new staff gets it as fresh (not RNP). Firms 50-50. Quota: 30% of remaining auto slots (120 − sheet today − carry-over fresh).</p>
       </section>
       <DataTable
         className="lead-book"
@@ -276,7 +276,7 @@ export default function BucketPage() {
       />
       <section className="lead-section" aria-label="UTC leads" style={{ marginTop: 18 }}>
         <h2>UTC{utcTotal == null ? '' : ` (${utcTotal})`}</h2>
-        <p className="muted">Same as RNP: after work end / 20:00 lands here. Next work start rotates A→B→C (matching client). Quota: 15% of (120 − today’s sheet leads).</p>
+        <p className="muted">UTC from after-work return, or fresh held 2 days with no RNP/UTC. Next work start rotates A→B→C; the new staff gets it as fresh. Firms 50-50. Quota: 15% of remaining auto slots (120 − sheet − carry-over fresh).</p>
       </section>
       <DataTable
         className="lead-book"
@@ -287,7 +287,7 @@ export default function BucketPage() {
       />
       <section className="lead-section" aria-label="Unassigned leads" style={{ marginTop: 18 }}>
         <h2>Unassigned leads{total == null ? '' : ` (${total})`}</h2>
-        <p className="muted">Bulk / manual uploads. Quota: 40% of (120 − sheet). If fewer leads are here, share equally (max 40%). Matching managing client only. Last 15% is for Team Leader+ to reassign manually (not auto-assigned).</p>
+        <p className="muted">Bulk / manual uploads. Quota: 40% of remaining auto slots (120 − sheet − carry-over fresh). Firms 50-50. Matching managing client only. Last 15% for TL+ manual. Manual assign may exceed 120.</p>
       </section>
       <DataTable
         className="lead-book"

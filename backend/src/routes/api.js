@@ -120,6 +120,7 @@ router.get('/leads/export', requirePermission('leads.export'), q, action(async (
   return reports.exportLeads(req.user, rows, req.query.format || 'xlsx', meta);
 }));
 router.get('/leads', requirePermission('leads.view'), q, action((req) => leads.list(req.user, req.query)));
+router.get('/leads-all/facets', requireRoles('OWNER', 'SUPER_ADMIN'), q, action((req) => leads.allLeadFacets(req.user, req.query)));
 router.post('/leads', requirePermission('leads.create'), validate({ body: schemas.lead }), action((req, meta) => leads.create(req.user, req.body, meta)));
 router.post('/leads/bulk/status', requirePermission('leads.edit'), validate({ body: schemas.bulkStatus }), action((req, meta) => leads.bulkStatus(req.user, req.body, meta)));
 router.post('/leads/bulk/delete', requirePermission('leads.delete'), validate({ body: schemas.bulkDelete }), action((req, meta) => leads.bulkRemove(req.user, req.body, meta)));
@@ -256,12 +257,23 @@ router.get('/lead-assignments/allow-status', requirePermission('leads.assign'), 
   const assignAllow = require('../services/assignAllow');
   return assignAllow.status();
 }));
+router.get('/lead-assignments/auto-assign-master', requireRoles('OWNER', 'SUPER_ADMIN'), action(async () => {
+  const assignAllow = require('../services/assignAllow');
+  return { data: await assignAllow.getAutoAssignMaster() };
+}));
+router.put('/lead-assignments/auto-assign-master', requireRoles('OWNER', 'SUPER_ADMIN'), validate({ body: schemas.autoAssignMaster }), action((req) => {
+  const assignAllow = require('../services/assignAllow');
+  return assignAllow.setAutoAssignMaster(req.user, req.body.enabled);
+}));
 router.post('/lead-assignments/allow', requireRoles('OWNER', 'SUPER_ADMIN'), validate({ body: schemas.assignAllow }), action((req) => {
   const assignAllow = require('../services/assignAllow');
   return assignAllow.allowAndAssign(req.user, req.body);
 }));
 router.post('/lead-assignments/auto-assign', requirePermission('leads.assign'), action(async () => {
   const assignAllow = require('../services/assignAllow');
+  if (!(await assignAllow.isAutoAssignOn())) {
+    return { data: { blocked: true }, message: 'Auto-assign is OFF. Owner/Super Admin must turn it ON in the side menu.' };
+  }
   const allow = await assignAllow.getTodayAllow();
   if (!allow.allowed) {
     return { data: { blocked: true }, message: 'Owner or Super Admin must Allow assigning first today' };
@@ -284,6 +296,9 @@ router.post('/lead-assignments/auto-assign', requirePermission('leads.assign'), 
 }));
 router.post('/lead-assignments/auto-assign-rnp', requirePermission('leads.assign'), action(async () => {
   const assignAllow = require('../services/assignAllow');
+  if (!(await assignAllow.isAutoAssignOn())) {
+    return { data: { blocked: true }, message: 'Auto-assign is OFF' };
+  }
   const allow = await assignAllow.getTodayAllow();
   if (!allow.allowed) return { data: { blocked: true }, message: 'Allow assigning first today' };
   const rnp = require('../services/rnp');
@@ -292,6 +307,9 @@ router.post('/lead-assignments/auto-assign-rnp', requirePermission('leads.assign
 }));
 router.post('/lead-assignments/auto-assign-utc', requirePermission('leads.assign'), action(async () => {
   const assignAllow = require('../services/assignAllow');
+  if (!(await assignAllow.isAutoAssignOn())) {
+    return { data: { blocked: true }, message: 'Auto-assign is OFF' };
+  }
   const allow = await assignAllow.getTodayAllow();
   if (!allow.allowed) return { data: { blocked: true }, message: 'Allow assigning first today' };
   const utc = require('../services/utc');
@@ -300,6 +318,9 @@ router.post('/lead-assignments/auto-assign-utc', requirePermission('leads.assign
 }));
 router.post('/lead-assignments/auto-assign-bulk', requirePermission('leads.assign'), action(async () => {
   const assignAllow = require('../services/assignAllow');
+  if (!(await assignAllow.isAutoAssignOn())) {
+    return { data: { blocked: true }, message: 'Auto-assign is OFF' };
+  }
   const allow = await assignAllow.getTodayAllow();
   if (!allow.allowed) return { data: { blocked: true }, message: 'Allow assigning first today' };
   const data = await autoAssign.autoAssignBulkLeads({ presentStaffIds: allow.presentStaffIds, ignoreWorkHours: true });

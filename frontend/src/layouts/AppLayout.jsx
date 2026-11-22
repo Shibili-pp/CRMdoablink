@@ -3,18 +3,19 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import {
   Bell, Building2, CalendarClock, Clock3, FileBarChart, Inbox, Kanban, KeyRound, LayoutDashboard,
-  Link2, ListChecks, LogOut, Menu, Phone, PhoneCall, ScrollText, Search, Settings, Shuffle, Target, Trophy, UserRound, Users, X,
+  Link2, ListChecks, LogOut, Menu, Phone, PhoneCall, Power, ScrollText, Search, Settings, Shuffle, Target, Trophy, UserRound, Users, X,
 } from 'lucide-react';
 import api, { getToken } from '../api/client';
 import { API_URL } from '../api/config';
 import HourlyLock from '../components/HourlyLock';
 import OverduePopup from '../components/OverduePopup';
 import { NAV } from '../constants/nav';
-import { useApp } from '../context/AppContext';
+import { messageFrom, useApp } from '../context/AppContext';
 
 const ICONS = {
   dashboard: LayoutDashboard,
   leads: Users,
+  allLeads: Users,
   pipeline: Kanban,
   bucket: Inbox,
   assign: Shuffle,
@@ -49,7 +50,7 @@ function openNotification(row, navigate) {
 }
 
 export default function AppLayout() {
-  const { user, logout, can } = useApp();
+  const { user, logout, can, toast } = useApp();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -57,6 +58,10 @@ export default function AppLayout() {
   const [unread, setUnread] = useState(0);
   const [bellOpen, setBellOpen] = useState(false);
   const [recent, setRecent] = useState([]);
+  const [autoAssignOn, setAutoAssignOn] = useState(false);
+  const [autoAssignMeta, setAutoAssignMeta] = useState({ sundayOff: false, resumeMonday: false });
+  const [autoAssignSaving, setAutoAssignSaving] = useState(false);
+  const canToggleAutoAssign = user?.role === 'OWNER' || user?.role === 'SUPER_ADMIN';
 
   const loadInbox = () => {
     api.get('/api/v1/notifications?limit=8').then((response) => {
@@ -65,8 +70,41 @@ export default function AppLayout() {
     }).catch(() => {});
   };
 
+  const applyAutoAssignMaster = (data = {}) => {
+    setAutoAssignOn(Boolean(data.enabled));
+    setAutoAssignMeta({
+      sundayOff: Boolean(data.sundayOff),
+      resumeMonday: Boolean(data.resumeMonday || data.resumeAfterSunday),
+    });
+  };
+
+  const loadAutoAssignMaster = () => {
+    if (!canToggleAutoAssign) return;
+    api.get('/api/v1/lead-assignments/auto-assign-master')
+      .then((response) => applyAutoAssignMaster(response.data.data || {}))
+      .catch(() => {
+        setAutoAssignOn(false);
+        setAutoAssignMeta({ sundayOff: false, resumeMonday: false });
+      });
+  };
+
+  const setAutoAssignMaster = async (enabled) => {
+    if (!canToggleAutoAssign || autoAssignSaving) return;
+    setAutoAssignSaving(true);
+    try {
+      const response = await api.put('/api/v1/lead-assignments/auto-assign-master', { enabled });
+      applyAutoAssignMaster(response.data.data || {});
+      toast(response.data.message || (enabled ? 'Auto-assign ON' : 'Auto-assign OFF'));
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+    } finally {
+      setAutoAssignSaving(false);
+    }
+  };
+
   useEffect(() => {
     loadInbox();
+    loadAutoAssignMaster();
     const socket = io(API_URL || undefined, { auth: { token: getToken() } });
     socket.on('notification', (payload) => {
       setUnread((count) => count + 1);
@@ -141,6 +179,41 @@ export default function AppLayout() {
               </NavLink>
             );
           })}
+          {canToggleAutoAssign && (
+            <div className={`nav-auto-assign ${autoAssignOn ? 'on' : 'off'}`} role="group" aria-label="Auto assigning">
+              <div className="nav-auto-assign-label">
+                <Power size={18} aria-hidden="true" />
+                <span>Auto assigning</span>
+              </div>
+              <div className="nav-auto-assign-toggle">
+                <button
+                  type="button"
+                  className={!autoAssignOn ? 'active' : ''}
+                  aria-pressed={!autoAssignOn}
+                  disabled={autoAssignSaving}
+                  onClick={() => setAutoAssignMaster(false)}
+                >
+                  OFF
+                </button>
+                <button
+                  type="button"
+                  className={autoAssignOn ? 'active' : ''}
+                  aria-pressed={autoAssignOn}
+                  disabled={autoAssignSaving}
+                  onClick={() => setAutoAssignMaster(true)}
+                >
+                  ON
+                </button>
+              </div>
+              {autoAssignMeta.sundayOff && (
+                <p className="nav-auto-assign-note">
+                  {autoAssignMeta.resumeMonday
+                    ? 'Sunday off · turns ON Monday'
+                    : 'Sunday off · not a working day'}
+                </p>
+              )}
+            </div>
+          )}
         </nav>
       </aside>
       <div className="main">

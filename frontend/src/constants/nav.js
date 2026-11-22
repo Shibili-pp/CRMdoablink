@@ -1,5 +1,6 @@
 export const NAV = [
   { to: '/', label: 'Dashboard', icon: 'dashboard', permission: 'dashboard.view' },
+  { to: '/all-leads', label: 'Leads', icon: 'allLeads', roles: ['OWNER', 'SUPER_ADMIN'] },
   { to: '/leads', label: 'Lead Management', icon: 'leads', permission: 'leads.view' },
   { to: '/pipeline', label: 'Pipeline', icon: 'pipeline', permission: 'leads.view' },
   { to: '/lead-bucket', label: 'Lead Bucket', icon: 'bucket', permission: 'leads.assign' },

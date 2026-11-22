@@ -85,7 +85,10 @@ async function buildLeadFilter(user, query, { bucket = false } = {}) {
   } else if (bucket && query.section !== 'all') {
     filter.status = { $nin: ['rnp', 'utc'] };
   }
-  if (!bucket && query.bucket !== 'unassigned' && !clean(query.staff)) filter.assignedTo = { $ne: null };
+  // Lead Management hides bucket leads. Owner/SA “All leads” (view=all) includes everything.
+  if (!bucket && query.view !== 'all' && query.bucket !== 'unassigned' && query.bucket !== 'assigned' && !clean(query.staff)) {
+    filter.assignedTo = { $ne: null };
+  }
   if (query.assignedFrom || query.assignedTo) {
     const fromKey = dateKeyOf(query.assignedFrom, 'Asia/Kolkata');
     const toKey = dateKeyOf(query.assignedTo, 'Asia/Kolkata');
@@ -134,12 +137,13 @@ async function untouchedLeadIds(filter) {
 
 async function list(user, query) {
   const bucket = query.view === 'bucket';
+  const allView = query.view === 'all';
   const { page, limit, skip } = paging(query);
   const filter = await buildLeadFilter(user, query, { bucket });
   const sort = bucket
     ? (query.sort ? sortFrom(query, LEAD_SORT) : { createdAt: -1 })
-    : leadListSort(query);
-  if (!bucket && (query.touch === 'untouched' || query.touch === 'worked')) {
+    : (allView && query.sort ? sortFrom(query, LEAD_SORT) : leadListSort(query));
+  if (!bucket && !allView && (query.touch === 'untouched' || query.touch === 'worked')) {
     const ids = await untouchedLeadIds(filter);
     if (query.touch === 'untouched') filter._id = { $in: ids };
     else if (ids.length) filter._id = { $nin: ids };
@@ -156,6 +160,87 @@ async function list(user, query) {
     Lead.countDocuments(filter),
   ]);
   return { data: rows.map(presentLead), meta: metaFor(page, limit, total) };
+}
+
+function facetRows(rows, keyField = '_id') {
+  return (rows || []).map((row) => ({
+    key: row[keyField] == null || row[keyField] === '' ? '' : String(row[keyField]),
+    count: row.count || 0,
+  })).sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
+}
+
+/** Owner/SA all-leads filter counts. Facets ignore their own selected value so options stay visible. */
+async function allLeadFacets(user, query = {}) {
+  if (!isElevated(user)) throw new AppError('Only Owner or Super Admin can open all leads', 403);
+  const baseQuery = { ...query, view: 'all' };
+  const fullFilter = await buildLeadFilter(user, baseQuery, { bucket: false });
+  const without = async (omitKeys = []) => {
+    const next = { ...baseQuery };
+    omitKeys.forEach((key) => { delete next[key]; });
+    return buildLeadFilter(user, next, { bucket: false });
+  };
+
+  const [
+    total,
+    status,
+    firm,
+    leadRole,
+    source,
+    priority,
+    staff,
+    fromSheet,
+    assignment,
+  ] = await Promise.all([
+    Lead.countDocuments(fullFilter),
+    Lead.aggregate([{ $match: await without(['status']) }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
+    Lead.aggregate([{ $match: await without(['firm']) }, { $group: { _id: '$firm', count: { $sum: 1 } } }]),
+    Lead.aggregate([{ $match: await without(['leadRole']) }, { $group: { _id: '$leadRole', count: { $sum: 1 } } }]),
+    Lead.aggregate([{ $match: await without(['source']) }, { $group: { _id: '$source', count: { $sum: 1 } } }]),
+    Lead.aggregate([{ $match: await without(['priority']) }, { $group: { _id: '$priority', count: { $sum: 1 } } }]),
+    Lead.aggregate([
+      { $match: await without(['staff', 'bucket']) },
+      { $match: { assignedTo: { $ne: null } } },
+      { $group: { _id: '$assignedTo', count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 200 },
+    ]),
+    Lead.aggregate([
+      { $match: await without(['fromSheet']) },
+      { $group: { _id: { $cond: ['$fromSheet', 'sheet', 'other'] }, count: { $sum: 1 } } },
+    ]),
+    Lead.aggregate([
+      { $match: await without(['bucket', 'staff']) },
+      { $group: { _id: { $cond: [{ $eq: ['$assignedTo', null] }, 'unassigned', 'assigned'] }, count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const staffIds = staff.map((row) => row._id).filter(Boolean);
+  const people = staffIds.length
+    ? await User.find({ _id: { $in: staffIds } }).select('name role employeeId').lean()
+    : [];
+  const peopleById = new Map(people.map((person) => [String(person._id), person]));
+
+  return {
+    data: {
+      total,
+      status: facetRows(status),
+      firm: facetRows(firm),
+      leadRole: facetRows(leadRole),
+      source: facetRows(source),
+      priority: facetRows(priority),
+      fromSheet: facetRows(fromSheet),
+      assignment: facetRows(assignment),
+      staff: staff.map((row) => {
+        const person = peopleById.get(String(row._id));
+        return {
+          key: String(row._id),
+          count: row.count || 0,
+          name: person?.name || 'Staff',
+          role: person?.role || '',
+        };
+      }),
+    },
+  };
 }
 
 async function findInScope(user, id, { bucket = false } = {}) {
@@ -533,15 +618,168 @@ async function timeline(user, id, query) {
   await findInScope(user, id);
   const { page, limit, skip } = paging(query);
   const filter = { lead: id };
-  const [rows, total] = await Promise.all([
+  const [rows, total, assignments] = await Promise.all([
     LeadActivity.find(filter).sort({ at: -1 }).skip(skip).limit(limit).lean(),
     LeadActivity.countDocuments(filter),
+    LeadAssignment.find({ lead: id })
+      .sort({ createdAt: -1 })
+      .populate('fromStaff', 'name role')
+      .populate('toStaff', 'name role')
+      .populate('assignedBy', 'name role')
+      .lean(),
   ]);
-  return { data: rows, meta: metaFor(page, limit, total) };
+
+  const assignEvents = assignments.map((row) => {
+    const fromName = row.fromStaff?.name || null;
+    const toName = row.toStaff?.name || null;
+    let description;
+    if (toName && fromName) description = `Reassigned ${fromName} → ${toName}${row.reason ? ` · ${row.reason}` : ''}`;
+    else if (toName) description = `Assigned to ${toName}${row.reason ? ` · ${row.reason}` : ''}`;
+    else if (fromName) description = `Unassigned from ${fromName}${row.reason ? ` · ${row.reason}` : ''}`;
+    else description = row.reason || 'Assignment updated';
+    return {
+      _id: `assign-${row._id}`,
+      type: toName ? (fromName ? 'lead_reassigned' : 'lead_assigned') : 'lead_unassigned',
+      actorName: row.assignedBy?.name || 'System',
+      description,
+      at: row.createdAt,
+      metadata: {
+        mode: row.mode,
+        fromStaff: row.fromStaff ? { id: row.fromStaff._id, name: row.fromStaff.name } : null,
+        toStaff: row.toStaff ? { id: row.toStaff._id, name: row.toStaff.name } : null,
+        source: 'assignment',
+      },
+    };
+  });
+
+  const merged = [...rows, ...assignEvents]
+    .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0))
+    .slice(0, Math.max(limit, 50));
+
+  return {
+    data: merged,
+    meta: {
+      ...metaFor(page, limit, total + assignments.length),
+      activityTotal: total,
+      assignmentTotal: assignments.length,
+    },
+  };
+}
+
+function activityActionLabel(row) {
+  const type = String(row.type || '').replaceAll('_', ' ');
+  if (row.type === 'status_changed' || row.type === 'lead_status_changed') {
+    const from = row.oldValue?.status || row.oldValue || '';
+    const to = row.newValue?.status || row.newValue || '';
+    if (from && to) return `Status ${String(from).replaceAll('_', ' ')} → ${String(to).replaceAll('_', ' ')}`;
+    return row.description || 'Status changed';
+  }
+  if (row.type === 'note_added') return row.description ? `Note: ${row.description}` : 'Added a note';
+  if (row.description) return row.description;
+  return type;
+}
+
+function buildStaffHandlers(lead, assignments, activities) {
+  const now = new Date();
+  const stints = [];
+
+  assignments.forEach((row, index) => {
+    if (!row.toStaff) {
+      // Returned to bucket / unassigned — close previous stint already handled by next bounds
+      return;
+    }
+    const start = row.createdAt ? new Date(row.createdAt) : now;
+    const next = assignments.slice(index + 1).find((item) => item.createdAt);
+    const end = next?.createdAt ? new Date(next.createdAt) : (
+      lead.assignedTo && String(lead.assignedTo._id || lead.assignedTo) === String(row.toStaff._id || row.toStaff)
+        ? null
+        : (next ? new Date(next.createdAt) : null)
+    );
+    stints.push({
+      staff: {
+        id: String(row.toStaff._id || row.toStaff),
+        name: row.toStaff.name || 'Staff',
+        role: row.toStaff.role || '',
+      },
+      fromStaff: row.fromStaff ? {
+        id: String(row.fromStaff._id || row.fromStaff),
+        name: row.fromStaff.name || 'Previous staff',
+        role: row.fromStaff.role || '',
+      } : null,
+      assignedBy: row.assignedBy ? {
+        id: String(row.assignedBy._id || row.assignedBy),
+        name: row.assignedBy.name || 'System',
+        role: row.assignedBy.role || '',
+      } : null,
+      assignedAt: start.toISOString(),
+      endedAt: end ? end.toISOString() : null,
+      current: !end && Boolean(lead.assignedTo) && String(lead.assignedTo._id || lead.assignedTo) === String(row.toStaff._id || row.toStaff),
+      reason: row.reason || '',
+      mode: row.mode || 'manual',
+    });
+  });
+
+  // If lead has an owner but no assignment rows yet, still show current holder.
+  if (!stints.length && lead.assignedTo) {
+    const owner = lead.assignedTo;
+    stints.push({
+      staff: {
+        id: String(owner._id || owner),
+        name: owner.name || 'Staff',
+        role: owner.role || '',
+      },
+      fromStaff: null,
+      assignedBy: null,
+      assignedAt: lead.assignmentDate ? new Date(lead.assignmentDate).toISOString() : (lead.createdAt ? new Date(lead.createdAt).toISOString() : null),
+      endedAt: null,
+      current: true,
+      reason: 'Current owner',
+      mode: 'manual',
+    });
+  }
+
+  return stints.map((stint, index) => {
+    const startMs = stint.assignedAt ? new Date(stint.assignedAt).getTime() : 0;
+    const endMs = stint.endedAt ? new Date(stint.endedAt).getTime() : Number.POSITIVE_INFINITY;
+    const during = activities.filter((row) => {
+      const at = new Date(row.at || 0).getTime();
+      if (at < startMs || at >= endMs) return false;
+      if (!row.actor) return true;
+      return String(row.actor) === String(stint.staff.id);
+    });
+    const actions = during.map((row) => ({
+      id: String(row._id),
+      type: row.type,
+      label: activityActionLabel(row),
+      at: row.at,
+      actorName: row.actorName || stint.staff.name,
+    }));
+    const summaryParts = [];
+    const statusMoves = during.filter((row) => row.type === 'status_changed' || row.type === 'lead_status_changed');
+    if (statusMoves.length) summaryParts.push(`${statusMoves.length} status update${statusMoves.length === 1 ? '' : 's'}`);
+    const calls = during.filter((row) => ['first_call', 'incoming_call', 'outgoing_call', 'call_connected', 'call_logged'].includes(row.type));
+    if (calls.length) summaryParts.push(`${calls.length} call${calls.length === 1 ? '' : 's'}`);
+    const notes = during.filter((row) => row.type === 'note_added');
+    if (notes.length) summaryParts.push(`${notes.length} note${notes.length === 1 ? '' : 's'}`);
+    const demos = during.filter((row) => row.type === 'demo_completed' || row.type === 'demo_booked');
+    if (demos.length) summaryParts.push(`${demos.length} demo`);
+    if (!summaryParts.length && during.length) summaryParts.push(`${during.length} update${during.length === 1 ? '' : 's'}`);
+    if (!summaryParts.length) summaryParts.push(stint.current ? 'Holding lead' : 'No logged actions');
+
+    return {
+      order: index + 1,
+      ...stint,
+      summary: summaryParts.join(' · '),
+      actions,
+      actionCount: actions.length,
+    };
+  });
 }
 
 async function involvement(user, id) {
-  const lead = await findInScope(user, id);
+  const leadDoc = await findInScope(user, id);
+  await leadDoc.populate('assignedTo', 'name role employeeId');
+  const lead = leadDoc.toObject();
   const [assignments, activities, payments] = await Promise.all([
     LeadAssignment.find({ lead: id }).sort({ createdAt: 1 }).populate('fromStaff', 'name role').populate('toStaff', 'name role').populate('assignedBy', 'name role').lean(),
     LeadActivity.find({ lead: id }).sort({ at: 1 }).lean(),
@@ -557,6 +795,7 @@ async function involvement(user, id) {
     });
     return [...map.values()];
   };
+  const handlers = buildStaffHandlers(lead, assignments, activities);
   return {
     data: {
       currentOwner: lead.assignedTo,
@@ -564,6 +803,8 @@ async function involvement(user, id) {
         staff: row.fromStaff, at: row.createdAt, reason: row.reason, mode: row.mode,
       })),
       assignmentHistory: assignments,
+      handlers,
+      handlerCount: handlers.length,
       contactedBy: people(activities.filter((row) => ['first_call', 'incoming_call', 'outgoing_call', 'call_connected'].includes(row.type)), (row) => (
         row.actor ? { _id: row.actor, name: row.actorName } : null
       )),
@@ -669,6 +910,9 @@ async function assignOne(user, { leadId, toStaff, reason, mode, expectedStaffId,
   const expected = expectedStaffId !== undefined && expectedStaffId !== '' ? expectedStaffId : lead.assignedTo;
   const filter = { _id: lead._id, deletedAt: null, assignedTo: expected || null };
   const assigningFromBucket = Boolean(staff) && !lead.assignedTo;
+  const reassigningToOther = Boolean(staff) && lead.assignedTo && String(lead.assignedTo) !== String(staff._id);
+  // New staff always sees the lead as fresh (RNP/UTC was for the previous owner only).
+  const presentAsFresh = assigningFromBucket || (reassigningToOther && ['rnp', 'utc'].includes(lead.status));
   const updated = await Lead.findOneAndUpdate(filter, {
     $set: {
       assignedTo: staff ? staff._id : null,
@@ -676,8 +920,16 @@ async function assignOne(user, { leadId, toStaff, reason, mode, expectedStaffId,
       branch: staff?.branch || lead.branch,
       assignmentDate: staff ? new Date() : lead.assignmentDate,
       bucketStatus: staff ? 'assigned' : 'unassigned',
-      // Fresh assign from bucket stays untouched until that staff changes status.
-      ...(assigningFromBucket ? { status: 'fresh', statusChangedAt: new Date() } : {}),
+      ...(presentAsFresh ? {
+        status: 'fresh',
+        statusChangedAt: new Date(),
+        rnpMarkedAt: null,
+        rnpNextCallAt: null,
+        rnpLastNotifyAt: null,
+        rnpNotifyCount: 0,
+        ...(lead.status === 'rnp' && lead.assignedTo ? { rnpLastStaff: lead.assignedTo } : {}),
+        ...(lead.status === 'utc' && lead.assignedTo ? { utcLastStaff: lead.assignedTo } : {}),
+      } : {}),
     },
   }, { new: true, session: session || undefined });
   if (!updated) return { ok: false, conflict: true, message: 'This lead was assigned by someone else' };
@@ -1157,6 +1409,7 @@ module.exports = {
   nextLeadCode,
   presentLead,
   list,
+  allLeadFacets,
   getById,
   create,
   update,

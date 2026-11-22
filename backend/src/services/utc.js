@@ -4,6 +4,8 @@ const { staffOnLeave } = require('./org');
 const { addActivity } = require('./activity');
 const { notify } = require('./notify');
 const { isWithinWorkHours } = require('./autoAssign');
+const { distributeWithFirmBalance, takeBalancedPool } = require('./firmBalance');
+const { autoCapacityByStaff, shareQuota } = require('./dailyCapacity');
 const { zonedParts, dateKeyFromDate, dayBounds } = require('../utils/time');
 const { BDA_WORKING_TARGET, DAILY_ASSIGN_SHARES } = require('../config/constants');
 
@@ -124,15 +126,14 @@ function rotateTarget(eligible, lastStaffId) {
   return eligible[(index + 1) % eligible.length];
 }
 
-function utcQuotaForStaff(sheetCount, alreadyUtc) {
-  const remaining = Math.max(0, DAILY_CALL_TARGET - Number(sheetCount || 0));
-  const cap = Math.floor(remaining * UTC_SHARE);
-  return Math.max(0, cap - Number(alreadyUtc || 0));
+function utcQuotaForStaff(remainingSlots, alreadyUtc) {
+  return shareQuota(remainingSlots, UTC_SHARE, alreadyUtc);
 }
 
 async function assignUtcLeadToStaff(lead, staff) {
   const filter = { _id: lead._id, deletedAt: null, assignedTo: null, status: 'utc' };
   const now = new Date();
+  // New staff gets this as fresh — UTC was only for the previous owner.
   const updated = await Lead.findOneAndUpdate(filter, {
     $set: {
       assignedTo: staff._id,
@@ -140,8 +141,9 @@ async function assignUtcLeadToStaff(lead, staff) {
       branch: staff.branch || lead.branch || null,
       assignmentDate: now,
       bucketStatus: 'assigned',
-      utcLastStaff: lead.utcLastStaff || lead.assignedTo || null,
+      status: 'fresh',
       statusChangedAt: now,
+      utcLastStaff: lead.utcLastStaff || lead.assignedTo || null,
     },
   }, { new: true });
   if (!updated) return { ok: false };
@@ -153,7 +155,7 @@ async function assignUtcLeadToStaff(lead, staff) {
     fromTeam: null,
     toTeam: staff.team || null,
     assignedBy: null,
-    reason: 'UTC rotate from bucket · matching managing client · 15% of remaining daily target',
+    reason: 'UTC rotate from bucket → fresh for new staff · firm 50-50 · 15% of remaining daily target',
     mode: 'round_robin',
   });
   await FollowUp.updateMany(
@@ -168,16 +170,16 @@ async function assignUtcLeadToStaff(lead, staff) {
     lead: updated,
     type: 'lead_assigned',
     actor: null,
-    description: `UTC rotated to ${staff.name}`,
-    oldValue: null,
-    newValue: staff._id,
-    metadata: { mode: 'utc_rotate' },
+    description: `UTC rotated to ${staff.name} as fresh`,
+    oldValue: { status: 'utc' },
+    newValue: { status: 'fresh', assignedTo: staff._id },
+    metadata: { mode: 'utc_rotate', firm: updated.firm || null, presentedAs: 'fresh' },
   });
   await notify({
     user: staff._id,
-    type: 'utc_assigned',
-    title: 'UTC lead assigned',
-    body: `${updated.name} (${updated.leadCode}) · call today`,
+    type: 'lead_assigned',
+    title: 'New lead assigned',
+    body: `${updated.name} (${updated.leadCode}) · fresh · call today`,
     module: 'leads',
     recordId: updated.id,
     dedupeKey: `utc-assign:${updated.id}:${staff.id}:${dateKeyFromDate(now, 'Asia/Kolkata')}`,
@@ -185,7 +187,7 @@ async function assignUtcLeadToStaff(lead, staff) {
   return { ok: true, lead: updated, staff };
 }
 
-/** Next work start: rotate bucket UTC to next matching staff, up to 15% of (120 − today’s sheet assigns). */
+/** Next work start: rotate bucket UTC to next matching staff, up to 15% of (120 − today’s sheet assigns). Firms 50-50 (fill from other if short). */
 async function autoAssignUtcLeads(options = {}) {
   const general = await getGeneral();
   const timeZone = general.timezone || 'Asia/Kolkata';
@@ -223,11 +225,12 @@ async function autoAssignUtcLeads(options = {}) {
   if (!working.length) return { assigned: 0, skipped: leads.length };
 
   const staffIds = working.map((person) => person._id);
-  const sheetCounts = await todaySheetAssignCounts(staffIds, timeZone, now);
+  const capacity = await autoCapacityByStaff(staffIds, timeZone, now);
   const utcCounts = await todayUtcAssignCounts(staffIds, timeZone, now);
 
   let assigned = 0;
   let skipped = 0;
+  const byFirm = { doablink: 0, studlink: 0, other: 0 };
   const groups = new Map();
   leads.forEach((lead) => {
     if (!groups.has(lead.leadRole)) groups.set(lead.leadRole, []);
@@ -243,42 +246,50 @@ async function autoAssignUtcLeads(options = {}) {
       continue;
     }
 
-    for (const lead of group) {
-      const target = rotateTarget(eligible, lead.utcLastStaff);
-      if (!target) {
-        skipped += 1;
-        continue;
-      }
-      const sid = String(target._id);
-      const quota = utcQuotaForStaff(sheetCounts.get(sid) || 0, utcCounts.get(sid) || 0);
-      let picked = quota > 0 ? target : null;
-      if (!picked) {
-        const startAt = Math.max(0, eligible.findIndex((person) => String(person._id) === sid));
-        for (let step = 1; step < eligible.length; step += 1) {
-          const candidate = eligible[(startAt + step) % eligible.length];
-          const cid = String(candidate._id);
-          if (utcQuotaForStaff(sheetCounts.get(cid) || 0, utcCounts.get(cid) || 0) > 0) {
-            picked = candidate;
-            break;
-          }
-        }
-      }
-      if (!picked) {
-        skipped += 1;
-        continue;
-      }
-      const result = await assignUtcLeadToStaff(lead, picked);
-      if (!result.ok) {
-        skipped += 1;
-        continue;
-      }
-      const pid = String(picked._id);
-      utcCounts.set(pid, (utcCounts.get(pid) || 0) + 1);
-      assigned += 1;
+    const quotas = new Map();
+    eligible.forEach((person) => {
+      const sid = String(person._id);
+      quotas.set(sid, utcQuotaForStaff(capacity.remaining.get(sid) || 0, utcCounts.get(sid) || 0));
+    });
+
+    const totalQuota = [...quotas.values()].reduce((sum, value) => sum + value, 0);
+    if (totalQuota <= 0) {
+      skipped += group.length;
+      continue;
     }
+
+    const pool = takeBalancedPool(group, totalQuota);
+    skipped += Math.max(0, group.length - pool.length);
+
+    const hint = pool.find((lead) => lead.utcLastStaff)?.utcLastStaff || null;
+    const result = await distributeWithFirmBalance({
+      leads: pool,
+      eligible,
+      quotas,
+      gotCounts: utcCounts,
+      rotateHintStaffId: hint,
+      preferLead: (lead, person) => {
+        const next = rotateTarget(eligible, lead.utcLastStaff);
+        return next && String(next._id) === String(person._id);
+      },
+      assignOne: (lead, person) => assignUtcLeadToStaff(lead, person),
+    });
+
+    assigned += result.assigned;
+    skipped += result.skipped;
+    Object.keys(byFirm).forEach((key) => {
+      byFirm[key] += result.byFirm?.[key] || 0;
+    });
   }
 
-  return { assigned, skipped, dailyTarget: DAILY_CALL_TARGET, share: UTC_SHARE, at: now.toISOString() };
+  return {
+    assigned,
+    skipped,
+    byFirm,
+    dailyTarget: DAILY_CALL_TARGET,
+    share: UTC_SHARE,
+    at: now.toISOString(),
+  };
 }
 
 module.exports = {

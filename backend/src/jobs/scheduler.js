@@ -6,12 +6,27 @@ const { generateForStaff } = require('../services/hourly');
 const { getGeneral } = require('../services/settings');
 const { syncAllEnabled } = require('../services/sheets');
 const { autoAssignSheetLeads } = require('../services/autoAssign');
+const { applyWeekendAutoAssignRule } = require('../services/assignAllow');
 const { processRnpReminders, moveRnpToBucketAfterWork } = require('../services/rnp');
 const { moveUtcToBucketAfterWork } = require('../services/utc');
+const { moveStaleFreshToUtcBucket } = require('../services/freshAging');
 const { zonedParts, dateKeyFromDate, addCalendarDays } = require('../utils/time');
 
 function startJobs() {
   if (process.env.NODE_ENV === 'test' || process.env.DISABLE_JOBS === 'true') return;
+  // Sunday force OFF / Monday restore ON for auto-assign master switch (Asia/Kolkata).
+  cron.schedule('2 * * * *', async () => {
+    try {
+      const master = await applyWeekendAutoAssignRule();
+      if (master.sundayOff && master.resumeMonday) {
+        console.log('Auto-assign: Sunday off · will resume Monday');
+      } else if (master.weekday === 1 && master.enabled && master.mondayRestoredAt) {
+        /* restored earlier in apply */ 
+      }
+    } catch (error) {
+      console.error('Auto-assign weekend rule failed:', error.message);
+    }
+  });
   cron.schedule('*/5 * * * *', async () => {
     try {
       await processReminders();
@@ -22,6 +37,8 @@ function startJobs() {
       if (moved.moved) console.log(`RNP to bucket: ${moved.moved}`);
       const utcMoved = await moveUtcToBucketAfterWork();
       if (utcMoved.moved) console.log(`UTC to bucket: ${utcMoved.moved}`);
+      const staleFresh = await moveStaleFreshToUtcBucket();
+      if (staleFresh.moved) console.log(`Fresh → UTC bucket (2-day hold): ${staleFresh.moved}`);
     } catch (error) {
       console.error('Reminder job failed:', error.message);
     }

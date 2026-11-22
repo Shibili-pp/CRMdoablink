@@ -67,7 +67,7 @@ export default function CallsTodayPage() {
   return (
     <Page
       title="Calls today"
-      subtitle={`${selectedName} · must call same day · Asia/Kolkata${meta.date ? ` · ${meta.date}` : ''}`}
+      subtitle={`${selectedName} · fresh stays up to 2 days · RNP/UTC same-day then rotate · Asia/Kolkata${meta.date ? ` · ${meta.date}` : ''}`}
       actions={<button className="btn secondary" type="button" onClick={load}>Refresh</button>}
     >
       {canFilterStaff && (
@@ -97,7 +97,7 @@ export default function CallsTodayPage() {
 
       <section className="lead-section" aria-label="Today call list">
         <h2>Today’s dial list{meta.total != null ? ` (${meta.total})` : ''}</h2>
-        <p className="muted">Fresh leads assigned today, plus RNP recalls due now. They leave this list after status is updated.</p>
+        <p className="muted">Fresh leads assigned today (including RNP/UTC rotated to you — shown as fresh), plus your own RNP recalls due now. They leave this list after status is updated.</p>
       </section>
 
       <DataTable

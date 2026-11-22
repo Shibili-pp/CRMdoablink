@@ -9,6 +9,7 @@ export default function AllowAssignPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [allow, setAllow] = useState(null);
+  const [masterOn, setMasterOn] = useState(false);
   const [buckets, setBuckets] = useState({ sheet: 0, rnp: 0, utc: 0, bulk: 0 });
   const [shares, setShares] = useState(null);
   const [staff, setStaff] = useState([]);
@@ -20,6 +21,7 @@ export default function AllowAssignPage() {
       .then((response) => {
         const data = response.data.data || {};
         setAllow(data.allow || null);
+        setMasterOn(Boolean(data.master?.enabled));
         setBuckets(data.buckets || { sheet: 0, rnp: 0, utc: 0, bulk: 0 });
         setShares(data.shares || null);
         setStaff((data.staff || []).map((row) => ({ ...row, present: Boolean(row.present) })));
@@ -77,11 +79,11 @@ export default function AllowAssignPage() {
   return (
     <Page
       title="Allow assigning"
-      subtitle="Morning gate for auto-assign. Mark present staff, review planned sheet / RNP / UTC / unassigned counts, then Allow. Absent staff get no leads. New sheet leads later today auto-share to present staff without asking again."
+      subtitle="Turn Auto assigning ON first. Auto fills only remaining of 120 after sheet today + carry-over fresh (manual may exceed 120). Fresh holds 2 days then UTC bucket; RNP/UTC rotate next day."
       actions={(
         <>
           <button className="btn secondary" type="button" onClick={load} disabled={loading || saving}>Refresh</button>
-          <button className="btn" type="button" onClick={allowAssign} disabled={loading || saving || !presentIds.length}>
+          <button className="btn" type="button" onClick={allowAssign} disabled={loading || saving || !masterOn || !presentIds.length}>
             {saving ? 'Assigning…' : (allow?.allowed ? 'Allow & assign again' : 'Allow assigning')}
           </button>
         </>
@@ -96,6 +98,15 @@ export default function AllowAssignPage() {
       </div>
 
       <div className="card" style={{ marginBottom: 14 }}>
+        <p style={{ marginBottom: 8 }}>
+          {masterOn
+            ? <Badge tone="success">Auto assigning ON</Badge>
+            : <Badge tone="danger">Auto assigning OFF</Badge>}
+          {' '}
+          {masterOn
+            ? 'Master switch is on — mark present staff and Allow below.'
+            : 'Turn Auto assigning ON in the side menu before allowing today’s mix. Sundays stay OFF automatically and resume Monday if it was ON.'}
+        </p>
         {allow?.allowed ? (
           <p>
             <Badge tone="success">Allowed today</Badge>
@@ -148,11 +159,13 @@ export default function AllowAssignPage() {
           { key: 'role', label: 'Role', render: (row) => row.role === 'TEAM_LEADER' ? 'Team leader' : 'Staff' },
           { key: 'hours', label: 'Work hours', render: (row) => `${row.workStart}–${row.workEnd}` },
           { key: 'clients', label: 'Managing clients', render: (row) => (row.managingClients || []).join(', ') || '—' },
+          { key: 'today', label: 'Sheet today', render: (row) => row.sheetAssignedToday ?? 0 },
+          { key: 'carry', label: 'Fresh carry', render: (row) => row.carryFresh ?? 0 },
+          { key: 'left', label: 'Auto left', render: (row) => row.autoRemaining ?? 0 },
           { key: 'sheet', label: 'Sheet', render: (row) => row.plan?.sheet ?? 0 },
           { key: 'rnp', label: 'RNP', render: (row) => row.plan?.rnp ?? 0 },
           { key: 'utc', label: 'UTC', render: (row) => row.plan?.utc ?? 0 },
           { key: 'bulk', label: 'Unassigned', render: (row) => row.plan?.bulk ?? 0 },
-          { key: 'today', label: 'Sheet today', render: (row) => row.sheetAssignedToday ?? 0 },
         ]}
       />
     </Page>

@@ -3,10 +3,13 @@ const { getGeneral } = require('./settings');
 const { staffOnLeave } = require('./org');
 const { addActivity } = require('./activity');
 const { notify } = require('./notify');
+const { distributeWithFirmBalance, takeBalancedPool } = require('./firmBalance');
+const { autoCapacityByStaff, shareQuota, DAILY_CALL_TARGET: CAP_TARGET } = require('./dailyCapacity');
 const { zonedParts, dateKeyFromDate, dayBounds } = require('../utils/time');
 const { BDA_WORKING_TARGET, DAILY_ASSIGN_SHARES } = require('../config/constants');
 
-const DAILY_CALL_TARGET = Number(DAILY_ASSIGN_SHARES.dailyTarget)
+const DAILY_CALL_TARGET = Number(CAP_TARGET)
+  || Number(DAILY_ASSIGN_SHARES.dailyTarget)
   || Number(BDA_WORKING_TARGET?.metrics?.find((row) => row.key === 'dialAttempts')?.daily)
   || 120;
 const BULK_SHARE = Number(DAILY_ASSIGN_SHARES.bulkUnassigned) || 0.4;
@@ -84,10 +87,8 @@ async function todayBulkAssignCounts(staffIds, timeZone, now) {
   return map;
 }
 
-function bulkQuotaForStaff(sheetCount, alreadyBulk) {
-  const remaining = Math.max(0, DAILY_CALL_TARGET - Number(sheetCount || 0));
-  const cap = Math.floor(remaining * BULK_SHARE);
-  return Math.max(0, cap - Number(alreadyBulk || 0));
+function bulkQuotaForStaff(remainingSlots, alreadyBulk) {
+  return shareQuota(remainingSlots, BULK_SHARE, alreadyBulk);
 }
 
 async function openLeadCounts(staffIds) {
@@ -117,7 +118,7 @@ async function setCursor(leadRole, index) {
   );
 }
 
-function pickStaff(eligible, todayCounts, openCounts, cursor) {
+function pickStaff(eligible, todayCounts, openCounts, cursor, dailyLeft = null) {
   if (!eligible.length) return null;
   const ordered = eligible
     .map((person, index) => ({
@@ -126,9 +127,10 @@ function pickStaff(eligible, todayCounts, openCounts, cursor) {
       today: todayCounts.get(String(person._id)) || 0,
       open: openCounts.get(String(person._id)) || 0,
       capacity: person.maxLeadAllocation || 50,
+      dailyLeft: dailyLeft ? (dailyLeft.get(String(person._id)) ?? DAILY_CALL_TARGET) : DAILY_CALL_TARGET,
       rotate: (index - (cursor % eligible.length) + eligible.length) % eligible.length,
     }))
-    .filter((row) => row.open < row.capacity)
+    .filter((row) => row.open < row.capacity && row.dailyLeft > 0)
     .sort((a, b) => {
       if (a.today !== b.today) return a.today - b.today;
       if (a.rotate !== b.rotate) return a.rotate - b.rotate;
@@ -203,7 +205,11 @@ async function autoAssignSheetLeads(options = {}) {
 
   let presentSet = null;
   if (options.requireAllow) {
-    const allow = await require('./assignAllow').getTodayAllow(timeZone);
+    const assignAllow = require('./assignAllow');
+    if (!(await assignAllow.isAutoAssignOn())) {
+      return { assigned: 0, skipped: 0, byClient: {}, blocked: true, reason: 'auto_assign_off' };
+    }
+    const allow = await assignAllow.getTodayAllow(timeZone);
     if (!allow.allowed || !allow.presentStaffIds?.length) {
       return { assigned: 0, skipped: 0, byClient: {}, blocked: true, reason: 'awaiting_allow' };
     }
@@ -266,10 +272,12 @@ async function autoAssignSheetLeads(options = {}) {
     const staffIds = eligible.map((person) => person._id);
     const todayCounts = await todayAssignCounts(staffIds, leadRole, timeZone, now);
     const openCounts = await openLeadCounts(staffIds);
+    const capacity = await autoCapacityByStaff(staffIds, timeZone, now);
+    const dailyLeft = new Map(capacity.remaining);
     let cursor = await getCursor(leadRole);
 
     for (const lead of group) {
-      const pick = pickStaff(eligible, todayCounts, openCounts, cursor);
+      const pick = pickStaff(eligible, todayCounts, openCounts, cursor, dailyLeft);
       if (!pick) {
         skipped += 1;
         continue;
@@ -288,6 +296,7 @@ async function autoAssignSheetLeads(options = {}) {
       const sid = String(pick.person._id);
       todayCounts.set(sid, (todayCounts.get(sid) || 0) + 1);
       openCounts.set(sid, (openCounts.get(sid) || 0) + 1);
+      dailyLeft.set(sid, Math.max(0, (dailyLeft.get(sid) || 0) - 1));
       cursor = (eligible.findIndex((person) => String(person._id) === sid) + 1) % eligible.length;
     }
 
@@ -344,13 +353,14 @@ async function autoAssignBulkLeads(options = {}) {
   }
 
   const allIds = working.map((person) => person._id);
-  const sheetCounts = await todaySheetCountsAll(allIds, timeZone, now);
+  const capacityMap = await autoCapacityByStaff(allIds, timeZone, now);
   const bulkCounts = await todayBulkAssignCounts(allIds, timeZone, now);
   const openCounts = await openLeadCounts(allIds);
 
   let assigned = 0;
   let skipped = 0;
   const byClient = {};
+  const byFirm = { doablink: 0, studlink: 0, other: 0 };
   const groups = new Map();
   leads.forEach((lead) => {
     if (!groups.has(lead.leadRole)) groups.set(lead.leadRole, []);
@@ -375,7 +385,7 @@ async function autoAssignBulkLeads(options = {}) {
       const open = openCounts.get(sid) || 0;
       const capacity = person.maxLeadAllocation || 50;
       const room = Math.max(0, capacity - open);
-      const quota = Math.min(room, bulkQuotaForStaff(sheetCounts.get(sid) || 0, bulkCounts.get(sid) || 0));
+      const quota = Math.min(room, bulkQuotaForStaff(capacityMap.remaining.get(sid) || 0, bulkCounts.get(sid) || 0));
       quotas.set(sid, quota);
     });
 
@@ -385,57 +395,48 @@ async function autoAssignBulkLeads(options = {}) {
       continue;
     }
 
-    const pool = group.slice(0, Math.min(group.length, totalQuota));
+    const pool = takeBalancedPool(group, totalQuota);
     skipped += Math.max(0, group.length - pool.length);
 
-    // Fair share: always give next lead to eligible staff with fewest bulk assigns today (and remaining quota).
-    let cursor = await getCursor(`bulk:${leadRole}`);
-    for (const lead of pool) {
-      const ordered = eligible
-        .map((person, index) => {
+    const cursor = await getCursor(`bulk:${leadRole}`);
+    const rotateHintStaffId = eligible.length
+      ? eligible[((Number(cursor) % eligible.length) + eligible.length - 1) % eligible.length]?._id
+      : null;
+
+    const result = await distributeWithFirmBalance({
+      leads: pool,
+      eligible,
+      quotas,
+      gotCounts: bulkCounts,
+      rotateHintStaffId,
+      assignOne: async (lead, person) => {
+        const assignedResult = await assignSheetLeadToStaff(
+          lead,
+          person,
+          `Auto-assigned · ${leadRole} · firm 50-50 · bulk bucket · up to 40% of remaining daily target`,
+        );
+        if (assignedResult.ok) {
           const sid = String(person._id);
-          return {
-            person,
-            sid,
-            left: quotas.get(sid) || 0,
-            got: bulkCounts.get(sid) || 0,
-            rotate: (index - (cursor % eligible.length) + eligible.length) % eligible.length,
-          };
-        })
-        .filter((row) => row.left > 0)
-        .sort((a, b) => {
-          if (a.got !== b.got) return a.got - b.got;
-          if (a.rotate !== b.rotate) return a.rotate - b.rotate;
-          return a.sid.localeCompare(b.sid);
-        });
-      const pick = ordered[0];
-      if (!pick) {
-        skipped += 1;
-        continue;
-      }
-      const result = await assignSheetLeadToStaff(
-        lead,
-        pick.person,
-        `Auto-assigned · ${leadRole} · bulk bucket · up to 40% of remaining daily target`,
-      );
-      if (!result.ok) {
-        skipped += 1;
-        continue;
-      }
-      assigned += 1;
-      byClient[leadRole].assigned += 1;
-      quotas.set(pick.sid, (quotas.get(pick.sid) || 0) - 1);
-      bulkCounts.set(pick.sid, (bulkCounts.get(pick.sid) || 0) + 1);
-      openCounts.set(pick.sid, (openCounts.get(pick.sid) || 0) + 1);
-      cursor = (eligible.findIndex((person) => String(person._id) === pick.sid) + 1) % eligible.length;
-    }
-    await setCursor(`bulk:${leadRole}`, cursor);
+          openCounts.set(sid, (openCounts.get(sid) || 0) + 1);
+          byClient[leadRole].assigned += 1;
+        }
+        return assignedResult;
+      },
+    });
+
+    assigned += result.assigned;
+    skipped += result.skipped;
+    Object.keys(byFirm).forEach((key) => {
+      byFirm[key] += result.byFirm?.[key] || 0;
+    });
+    await setCursor(`bulk:${leadRole}`, Number(result.nextCursor) || 0);
   }
 
   return {
     assigned,
     skipped,
     byClient,
+    byFirm,
     share: BULK_SHARE,
     reservedShare: RESERVED_SHARE,
     dailyTarget: DAILY_CALL_TARGET,

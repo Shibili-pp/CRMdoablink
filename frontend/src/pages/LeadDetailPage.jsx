@@ -209,7 +209,10 @@ export default function LeadDetailPage() {
   };
 
   const statusLabel = statuses.find((item) => item.key === lead.status)?.label;
-  const owners = people?.previousOwners || [];
+  const handlers = people?.handlers || [];
+  const formatStamp = (value) => (value
+    ? new Date(value).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '—');
 
   return (
     <Page title={lead.name} subtitle={lead.leadCode} actions={can('leads.delete') && <button className="btn danger" type="button" onClick={archive}>Archive</button>}>
@@ -359,17 +362,57 @@ export default function LeadDetailPage() {
 
       <article className="card lead-block">
         <h3>History</h3>
-        {owners.length > 0 && (
-          <p className="muted lead-owners">Earlier: {owners.map((row) => row.staff?.name || 'Previous owner').join(', ')}</p>
-        )}
+        <section className="staff-journey" aria-label="Staff who handled this lead">
+          <h4>Staff who handled this lead{handlers.length ? ` (${handlers.length})` : ''}</h4>
+          <p className="muted">From first assign to the latest owner — previous staff, dates, and what they did.</p>
+          {!handlers.length && <p className="muted">No assignment history yet.</p>}
+          <ol className="staff-journey-list">
+            {handlers.map((row) => (
+              <li key={`${row.order}-${row.staff?.id}-${row.assignedAt}`} className={row.current ? 'current' : ''}>
+                <div className="staff-journey-head">
+                  <strong>{row.order}. {row.staff?.name || 'Staff'}</strong>
+                  {row.current ? <span className="badge priority-high">Current</span> : null}
+                </div>
+                <div className="muted">
+                  Assigned {formatStamp(row.assignedAt)}
+                  {row.endedAt ? ` · Left ${formatStamp(row.endedAt)}` : ' · Still holding'}
+                </div>
+                {row.fromStaff?.name && (
+                  <div className="muted">Previous staff: {row.fromStaff.name}</div>
+                )}
+                {(row.reason || row.mode) && (
+                  <div className="muted">
+                    {[row.mode ? String(row.mode).replaceAll('_', ' ') : '', row.reason].filter(Boolean).join(' · ')}
+                  </div>
+                )}
+                <p className="staff-journey-summary">{row.summary}</p>
+                {!!row.actions?.length && (
+                  <ul className="staff-journey-actions">
+                    {row.actions.slice(0, 8).map((action) => (
+                      <li key={action.id}>
+                        <span>{action.label}</span>
+                        <span className="muted">{formatStamp(action.at)}</span>
+                      </li>
+                    ))}
+                    {row.actions.length > 8 && (
+                      <li className="muted">+{row.actions.length - 8} more actions</li>
+                    )}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ol>
+        </section>
+        <h4 className="timeline-heading">Timeline</h4>
         <div className="timeline">
           {timeline.map((item) => (
             <article key={item._id}>
-              <strong>{item.type.replaceAll('_', ' ')}</strong>
-              <div className="muted">{item.actorName || 'System'} · {new Date(item.at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>
+              <strong>{String(item.type || '').replaceAll('_', ' ')}</strong>
+              <div className="muted">{item.actorName || 'System'} · {formatStamp(item.at)}</div>
               <p>{item.description}</p>
             </article>
           ))}
+          {!timeline.length && <p className="muted">No timeline events yet.</p>}
         </div>
       </article>
 
