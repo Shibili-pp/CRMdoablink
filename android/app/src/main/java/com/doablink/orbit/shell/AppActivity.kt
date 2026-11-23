@@ -183,7 +183,7 @@ class AppActivity : AppCompatActivity() {
             javaScriptCanOpenWindowsAutomatically = true
             allowFileAccess = false
             allowContentAccess = true
-            userAgentString = "$userAgentString DoablinkOrbitApp/0.3.3"
+            userAgentString = "$userAgentString DoablinkOrbitApp/0.3.4"
         }
         webView.addJavascriptInterface(Bridge(), "OrbitNative")
         webView.webViewClient = Client()

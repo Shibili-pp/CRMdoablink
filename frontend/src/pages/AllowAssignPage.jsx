@@ -79,7 +79,7 @@ export default function AllowAssignPage() {
   return (
     <Page
       title="Allow assigning"
-      subtitle="Turn Auto assigning ON first. Auto fills only remaining of 120 after sheet today + carry-over fresh (manual may exceed 120). Fresh holds 2 days then UTC bucket; RNP/UTC rotate next day."
+      subtitle="Staff answer “Are you working today?” when they open CRM (morning). Only Yes staff get auto leads — sheet + mix split among them. You can still override present list here. Target 120 after holds + sheet."
       actions={(
         <>
           <button className="btn secondary" type="button" onClick={load} disabled={loading || saving}>Refresh</button>
@@ -154,13 +154,20 @@ export default function AllowAssignPage() {
             ),
           },
           { key: 'name', label: 'Staff', render: (row) => (
-            <span>{row.name}{row.onLeave ? <Badge tone="danger"> Leave</Badge> : null}</span>
+            <span>
+              {row.name}
+              {row.onLeave ? <Badge tone="danger"> Leave</Badge> : null}
+              {row.selfCheck === true ? <Badge tone="success"> Working</Badge> : null}
+              {row.selfCheck === false ? <Badge tone="danger"> Off</Badge> : null}
+              {row.selfCheck == null && !row.onLeave ? <Badge tone="warning"> Pending</Badge> : null}
+              {row.autoAssignApplicable === false ? <Badge tone="danger"> Auto N/A</Badge> : null}
+            </span>
           ) },
           { key: 'role', label: 'Role', render: (row) => row.role === 'TEAM_LEADER' ? 'Team leader' : 'Staff' },
           { key: 'hours', label: 'Work hours', render: (row) => `${row.workStart}–${row.workEnd}` },
           { key: 'clients', label: 'Managing clients', render: (row) => (row.managingClients || []).join(', ') || '—' },
           { key: 'today', label: 'Sheet today', render: (row) => row.sheetAssignedToday ?? 0 },
-          { key: 'carry', label: 'Fresh carry', render: (row) => row.carryFresh ?? 0 },
+          { key: 'carry', label: 'Hold carry', render: (row) => row.carryFresh ?? 0 },
           { key: 'left', label: 'Auto left', render: (row) => row.autoRemaining ?? 0 },
           { key: 'sheet', label: 'Sheet', render: (row) => row.plan?.sheet ?? 0 },
           { key: 'rnp', label: 'RNP', render: (row) => row.plan?.rnp ?? 0 },

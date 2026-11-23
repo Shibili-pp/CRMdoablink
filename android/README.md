@@ -14,6 +14,18 @@ The install file is `dist/DoablinkOrbit.apk`. It is signed with `release.jks`. K
 
 Calls then appear in Calling Analytics and Hourly Reports as Android sync. Each phone is tied to the staff member who signed in.
 
+## Keep the in-app CRM UI in sync with web
+
+The app WebView serves the same React CRM from `app/src/main/assets/www` (bundled copy of `frontend/dist`). Native Kotlin only handles login shell, call-log sync, dialer, and downloads.
+
+Before you assemble an APK, refresh those assets from the repo root:
+
+```bat
+npm run sync:android-web
+```
+
+That builds the frontend and copies it into `android/app/src/main/assets/www`.
+
 ## Build again
 
-Open this folder in Android Studio, or from `android/` run `gradlew.bat assembleRelease`. The SDK path belongs in `local.properties`.
+Open this folder in Android Studio, or from `android/` run `gradlew.bat assembleRelease`. The SDK path belongs in `local.properties`. Current app version is `0.3.4` (versionCode 6).

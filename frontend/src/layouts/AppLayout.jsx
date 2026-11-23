@@ -3,12 +3,13 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import {
   Bell, Building2, CalendarClock, Clock3, FileBarChart, Inbox, Kanban, KeyRound, LayoutDashboard,
-  Link2, ListChecks, LogOut, Menu, Phone, PhoneCall, Power, ScrollText, Search, Settings, Shuffle, Target, Trophy, UserRound, Users, X,
+  Link2, ListChecks, LogOut, Menu, Pause, Phone, PhoneCall, Power, ScrollText, Search, Settings, Shuffle, Target, Trophy, UserRound, Users, X,
 } from 'lucide-react';
 import api, { getToken } from '../api/client';
 import { API_URL } from '../api/config';
 import HourlyLock from '../components/HourlyLock';
 import OverduePopup from '../components/OverduePopup';
+import WorkingTodayPrompt from '../components/WorkingTodayPrompt';
 import { NAV } from '../constants/nav';
 import { messageFrom, useApp } from '../context/AppContext';
 
@@ -16,6 +17,7 @@ const ICONS = {
   dashboard: LayoutDashboard,
   leads: Users,
   allLeads: Users,
+  passkey: KeyRound,
   pipeline: Kanban,
   bucket: Inbox,
   assign: Shuffle,
@@ -61,7 +63,10 @@ export default function AppLayout() {
   const [autoAssignOn, setAutoAssignOn] = useState(false);
   const [autoAssignMeta, setAutoAssignMeta] = useState({ sundayOff: false, resumeMonday: false });
   const [autoAssignSaving, setAutoAssignSaving] = useState(false);
+  const [holdAssignedOn, setHoldAssignedOn] = useState(false);
+  const [holdAssignedSaving, setHoldAssignedSaving] = useState(false);
   const canToggleAutoAssign = user?.role === 'OWNER' || user?.role === 'SUPER_ADMIN';
+  const canToggleHoldAssigned = user?.role === 'OWNER';
 
   const loadInbox = () => {
     api.get('/api/v1/notifications?limit=8').then((response) => {
@@ -102,9 +107,31 @@ export default function AppLayout() {
     }
   };
 
+  const loadHoldAssigned = () => {
+    if (!canToggleHoldAssigned && !can('leads.view')) return;
+    api.get('/api/v1/lead-assignments/hold-assigned')
+      .then((response) => setHoldAssignedOn(Boolean(response.data.data?.enabled)))
+      .catch(() => setHoldAssignedOn(false));
+  };
+
+  const setHoldAssignedMaster = async (enabled) => {
+    if (!canToggleHoldAssigned || holdAssignedSaving) return;
+    setHoldAssignedSaving(true);
+    try {
+      const response = await api.put('/api/v1/lead-assignments/hold-assigned', { enabled });
+      setHoldAssignedOn(Boolean(response.data.data?.enabled));
+      toast(response.data.message || (enabled ? 'Hold assigned ON' : 'Hold assigned OFF'));
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+    } finally {
+      setHoldAssignedSaving(false);
+    }
+  };
+
   useEffect(() => {
     loadInbox();
     loadAutoAssignMaster();
+    loadHoldAssigned();
     const socket = io(API_URL || undefined, { auth: { token: getToken() } });
     socket.on('notification', (payload) => {
       setUnread((count) => count + 1);
@@ -214,6 +241,39 @@ export default function AppLayout() {
               )}
             </div>
           )}
+          {canToggleHoldAssigned && (
+            <div className={`nav-auto-assign ${holdAssignedOn ? 'on' : 'off'}`} role="group" aria-label="Hold assigned leads">
+              <div className="nav-auto-assign-label">
+                <Pause size={18} aria-hidden="true" />
+                <span>Hold assigned</span>
+              </div>
+              <div className="nav-auto-assign-toggle">
+                <button
+                  type="button"
+                  className={!holdAssignedOn ? 'active' : ''}
+                  aria-pressed={!holdAssignedOn}
+                  disabled={holdAssignedSaving}
+                  onClick={() => setHoldAssignedMaster(false)}
+                >
+                  OFF
+                </button>
+                <button
+                  type="button"
+                  className={holdAssignedOn ? 'active' : ''}
+                  aria-pressed={holdAssignedOn}
+                  disabled={holdAssignedSaving}
+                  onClick={() => setHoldAssignedMaster(true)}
+                >
+                  ON
+                </button>
+              </div>
+              <p className="nav-auto-assign-note">
+                {holdAssignedOn
+                  ? 'Setup mode · LM keeps leads · Calls Today off'
+                  : 'Normal dialing & bucket rules'}
+              </p>
+            </div>
+          )}
         </nav>
       </aside>
       <div className="main">
@@ -282,6 +342,7 @@ export default function AppLayout() {
           <Outlet />
         </div>
         <OverduePopup />
+        <WorkingTodayPrompt />
         <HourlyLock />
       </div>
     </div>

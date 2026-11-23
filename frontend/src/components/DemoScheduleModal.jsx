@@ -5,7 +5,18 @@ function todayKey() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
-export default function DemoScheduleModal({ leadName, onCancel, onConfirm }) {
+export const DEMO_GATE_STATUSES = [
+  'demo_booked',
+  'demo_confirmed',
+  'demo_rescheduled',
+];
+
+export default function DemoScheduleModal({
+  leadName,
+  statusLabel = 'Demo Booked',
+  onCancel,
+  onConfirm,
+}) {
   const [date, setDate] = useState(todayKey());
   const [time, setTime] = useState('11:00');
   const [saving, setSaving] = useState(false);
@@ -24,12 +35,13 @@ export default function DemoScheduleModal({ leadName, onCancel, onConfirm }) {
   return (
     <div className="modal-back" role="presentation">
       <form className="modal" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="demo-schedule-title">
-        <h2 id="demo-schedule-title">Schedule demo</h2>
+        <h2 id="demo-schedule-title">Set upcoming demo</h2>
         <p className="muted" style={{ margin: '8px 0 14px' }}>
-          {leadName ? `${leadName} · ` : ''}Choose date and time. This creates an upcoming demo in Follow-ups.
+          {leadName ? `${leadName} · ` : ''}
+          Choose demo date and time for {statusLabel}. This adds it to Follow-ups → Upcoming demos.
         </p>
         <div className="form-grid">
-          <label className="field"><span>Date</span>
+          <label className="field"><span>Demo date</span>
             <input type="date" aria-label="Demo date" value={date} onChange={(event) => setDate(event.target.value)} required />
           </label>
           <label className="field"><span>Time</span>

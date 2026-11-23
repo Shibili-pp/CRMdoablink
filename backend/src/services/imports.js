@@ -1,13 +1,14 @@
 const xlsx = require('xlsx');
-const { LeadImport, Lead } = require('../models');
+const { LeadImport, Lead, LeadAssignment, User } = require('../models');
 const { AppError, paging, metaFor } = require('../utils/http');
-const { normalizePhone, isValidPhone } = require('../utils/phone');
+const { coercePhoneText, normalizePhone, isValidPhone } = require('../utils/phone');
 const { HEADER_ALIASES, IMPORT_FIELDS, PRIORITIES, QUALITIES } = require('../config/constants');
 const { getGeneral, getLeadSources, assertLeadRole, assertLeadFirm, assertLeadSource, activeStatuses } = require('./settings');
 const { nextLeadCode, presentLead } = require('./leads');
 const { addActivity } = require('./activity');
 const { recordAudit } = require('./audit');
-const { hasPermission } = require('./access');
+const { notify } = require('./notify');
+const { hasPermission, staffScope } = require('./access');
 
 const MAX_ROWS = 2000;
 
@@ -49,19 +50,73 @@ function applyMapping(raw, mapping) {
 }
 
 function normalizeStatusToken(value) {
-  return String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return String(value || '').trim().toLowerCase().replace(/[\s/-]+/g, '_');
 }
+
+function compactStatusToken(value) {
+  return normalizeStatusToken(value).replace(/_/g, '');
+}
+
+// Staff Excel stage labels → CRM status keys
+const STATUS_ALIASES = {
+  dq: 'disqualified',
+  disqualify: 'disqualified',
+  disqualified: 'disqualified',
+  ni: 'not_interested',
+  notinterested: 'not_interested',
+  notintrested: 'not_interested',
+  rnr: 'rnp',
+  ringnotpick: 'rnp',
+  ringnopick: 'rnp',
+  unabletoconnect: 'utc',
+  followup: 'follow_up_required',
+  followuprequired: 'follow_up_required',
+  follow_up_required: 'follow_up_required',
+  new: 'fresh',
+  newlead: 'fresh',
+  untouched: 'fresh',
+  untouch: 'fresh',
+  notcontacted: 'not_contacted',
+  maybuylater: 'may_buy_later',
+  may_buy_later: 'may_buy_later',
+  buylater: 'may_buy_later',
+  prospect: 'prospect',
+  prospective: 'prospect',
+  dpreceived: 'dp_received',
+  dp_received: 'dp_received',
+  interestedtobuy: 'interested_to_buy',
+  interested_to_buy: 'interested_to_buy',
+  demoover: 'demo_completed',
+  demo_over: 'demo_completed',
+  democomplete: 'demo_completed',
+  democompleted: 'demo_completed',
+  demobooked: 'demo_booked',
+  democonfirmed: 'demo_confirmed',
+  demo_confirmed: 'demo_confirmed',
+  demorescheduled: 'demo_rescheduled',
+  demo_rescheduled: 'demo_rescheduled',
+  democancelled: 'demo_cancelled',
+  demo_cancelled: 'demo_cancelled',
+  democanceled: 'demo_cancelled',
+  hold: 'follow_up_required',
+  onhold: 'follow_up_required',
+};
 
 function resolveStatusKey(value, statuses) {
   const raw = String(value || '').trim();
   if (!raw) return '';
   const token = normalizeStatusToken(raw);
+  const compact = compactStatusToken(raw);
+  const alias = STATUS_ALIASES[token] || STATUS_ALIASES[compact];
   const match = (statuses || []).find((status) => (
     status.key === token
+    || status.key === alias
+    || compactStatusToken(status.key) === compact
     || normalizeStatusToken(status.label) === token
+    || compactStatusToken(status.label) === compact
     || String(status.label || '').trim().toLowerCase() === raw.toLowerCase()
   ));
-  return match ? match.key : null;
+  return match ? match.key : (alias || null);
 }
 
 async function validateRows(rawRows, mapping, countryCode, sources, statuses) {
@@ -88,16 +143,18 @@ async function validateRows(rawRows, mapping, countryCode, sources, statuses) {
   return prepared.map((row) => {
     const errors = [];
     const phoneNormalized = normalizePhone(row.mapped.phone, countryCode);
-    if (!row.mapped.name) errors.push('Name is required');
+    const name = String(row.mapped.name || '').trim() || 'NO Name';
     if (!row.mapped.phone) errors.push('Phone is required');
     else if (!isValidPhone(phoneNormalized)) errors.push('Phone number is invalid');
     if (row.mapped.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.mapped.email)) errors.push('Email is invalid');
     if (row.mapped.priority && !PRIORITIES.includes(row.mapped.priority.toLowerCase())) errors.push('Priority is invalid');
     if (row.mapped.quality && !QUALITIES.includes(row.mapped.quality.toLowerCase())) errors.push('Quality is invalid');
     let statusKey = '';
+    let statusFallback = false;
     if (row.mapped.status) {
       statusKey = resolveStatusKey(row.mapped.status, statuses);
-      if (!statusKey) errors.push('Stage/status value is not a known lead status');
+      // Unknown Excel stages should not block import — use CRM default on commit.
+      if (!statusKey) statusFallback = true;
     }
     let duplicateInFile = false;
     if (phoneNormalized) {
@@ -108,7 +165,15 @@ async function validateRows(rawRows, mapping, countryCode, sources, statuses) {
     return {
       rowNumber: row.rowNumber,
       raw: row.raw,
-      mapped: { ...row.mapped, phoneNormalized, statusKey },
+      mapped: {
+        ...row.mapped,
+        name,
+        phone: coercePhoneText(row.mapped.phone) || row.mapped.phone,
+        phoneNormalized,
+        statusKey,
+        statusFallback,
+        excelStage: row.mapped.status || '',
+      },
       rowErrors: errors,
       duplicateInFile,
       duplicateLeadId: existingLead?._id,
@@ -283,11 +348,25 @@ async function commit(user, id, body, meta) {
   const leadRole = await assertLeadRole(body.leadRole);
   const firm = await assertLeadFirm(body.firm);
   const source = await assertLeadSource(body.source);
+  let assignStaff = null;
+  if (body.assignedTo) {
+    if (!hasPermission(user, 'leads.assign') && user.role !== 'OWNER') {
+      throw new AppError('You do not have permission to assign leads on import', 403);
+    }
+    assignStaff = await User.findOne({
+      _id: body.assignedTo,
+      deletedAt: null,
+      isActive: true,
+      role: { $in: ['STAFF', 'TEAM_LEADER'] },
+      ...staffScope(user),
+    });
+    if (!assignStaff) throw new AppError('Selected staff member was not found or is not assignable', 422);
+  }
   let imported = 0;
   let updated = 0;
   let skipped = 0;
   let failed = 0;
-  const branch = user.branch || null;
+  const branch = assignStaff?.branch || user.branch || null;
   for (let index = 0; index < doc.rows.length; index += 1) {
     const row = doc.rows[index];
     const selectedRow = !selected.size || selected.has(row.rowNumber);
@@ -319,6 +398,7 @@ async function commit(user, id, body, meta) {
       try {
         const phoneNormalized = normalizePhone(row.mapped.phone, general.countryCode);
         const mappedFields = fieldsFromMapped(row.mapped, sources, defaultStatus);
+        const now = new Date();
         const lead = await Lead.create({
           leadCode: await nextLeadCode(),
           name: row.mapped.name,
@@ -329,18 +409,50 @@ async function commit(user, id, body, meta) {
           leadRole: leadRole.key,
           firm: firm.key,
           branch,
+          team: assignStaff?.team || null,
           createdBy: user._id,
-          assignedTo: null,
-          bucketStatus: 'unassigned',
+          assignedTo: assignStaff ? assignStaff._id : null,
+          assignmentDate: assignStaff ? now : undefined,
+          bucketStatus: assignStaff ? 'assigned' : 'unassigned',
+          callQueueTier: assignStaff
+            ? require('../utils/callQueue').resolveCallQueueTier({
+              fromSheet: false,
+              mode: 'import',
+              role: user.role,
+            })
+            : 3,
           importBatch: doc._id,
           status: mappedFields.status || defaultStatus,
-          statusChangedAt: new Date(),
+          statusChangedAt: now,
         });
         await addActivity({
           lead, type: 'lead_imported', actor: user,
-          description: `Imported from ${doc.fileName}`,
-          metadata: { importId: doc.id, rowNumber: row.rowNumber },
+          description: assignStaff
+            ? `Imported from ${doc.fileName} and assigned to ${assignStaff.name}`
+            : `Imported from ${doc.fileName}`,
+          metadata: { importId: doc.id, rowNumber: row.rowNumber, assignedTo: assignStaff?._id || null },
         });
+        if (assignStaff) {
+          await LeadAssignment.create({
+            lead: lead._id,
+            fromStaff: null,
+            toStaff: assignStaff._id,
+            fromTeam: null,
+            toTeam: assignStaff.team || null,
+            assignedBy: user._id,
+            reason: 'Assigned on Excel import',
+            mode: 'import',
+          });
+          await notify({
+            user: assignStaff._id,
+            type: 'lead_assigned',
+            title: 'New lead assigned',
+            body: `${lead.name} (${lead.leadCode})`,
+            module: 'leads',
+            recordId: lead.id,
+            dedupeKey: `assign:${lead.id}:${assignStaff.id}`,
+          });
+        }
         row.action = 'imported';
         row.importedLeadId = lead._id;
         imported += 1;
@@ -372,13 +484,18 @@ async function commit(user, id, body, meta) {
 function fieldsFromMapped(mapped, sources, defaultStatus = 'fresh') {
   const revenue = Number(String(mapped.expectedRevenue || '').replace(/[^0-9.]/g, ''));
   const status = mapped.statusKey || defaultStatus;
+  let remarks = mapped.remarks || '';
+  if (mapped.statusFallback && mapped.excelStage) {
+    const note = `Excel stage: ${mapped.excelStage}`;
+    remarks = remarks ? `${remarks} · ${note}` : note;
+  }
   return {
     alternatePhone: mapped.alternatePhone || '',
     alternatePhoneNormalized: mapped.alternatePhone ? normalizePhone(mapped.alternatePhone) : '',
     email: mapped.email || '',
     company: mapped.company || '',
     consultancyName: mapped.consultancyName || '',
-    district: mapped.district || '',
+    district: mapped.district || mapped.location || '',
     city: mapped.city || '',
     state: mapped.state || '',
     country: mapped.country || 'India',
@@ -392,7 +509,7 @@ function fieldsFromMapped(mapped, sources, defaultStatus = 'fresh') {
     expectedRevenue: Number.isFinite(revenue) ? revenue : 0,
     notes: mapped.notes || '',
     comment: mapped.comment || '',
-    remarks: mapped.remarks || '',
+    remarks,
     tags: mapped.tags ? String(mapped.tags).split(/[|,]/).map((tag) => tag.trim()).filter(Boolean) : [],
     source: sources?.includes(mapped.source) ? mapped.source : undefined,
   };

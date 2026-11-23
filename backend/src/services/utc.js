@@ -21,7 +21,23 @@ function clockToMinutes(value) {
   return (Number(match[1]) * 60) + Number(match[2]);
 }
 
+/** Marked today → keep with staff through tomorrow; move only after a later day’s work end. */
+function utcHoldComplete(markedAt, now, timeZone) {
+  if (!markedAt) return true;
+  const markedKey = dateKeyFromDate(new Date(markedAt), timeZone);
+  const todayKey = dateKeyFromDate(now, timeZone);
+  return Boolean(markedKey && todayKey && markedKey < todayKey);
+}
+
 async function moveUtcToBucketAfterWork() {
+  const assignAllow = require('./assignAllow');
+  if (await assignAllow.isHoldAssignedOn()) {
+    return { moved: 0, blocked: true, reason: 'hold_assigned_on' };
+  }
+  // While Auto assigning is OFF, staff keep their leads (UTC stays assigned).
+  if (!(await assignAllow.isAutoAssignOn())) {
+    return { moved: 0, blocked: true, reason: 'auto_assign_off' };
+  }
   const general = await getGeneral();
   const timeZone = general.timezone || 'Asia/Kolkata';
   const now = new Date();
@@ -35,19 +51,26 @@ async function moveUtcToBucketAfterWork() {
     assignedTo: { $ne: null },
   }).limit(500);
 
-  if (!leads.length) return { moved: 0 };
+  if (!leads.length) return { moved: 0, held: 0 };
 
   const staffIds = [...new Set(leads.map((lead) => String(lead.assignedTo)))];
   const people = await User.find({ _id: { $in: staffIds } }).select('name workEnd').lean();
   const byId = new Map(people.map((person) => [String(person._id), person]));
 
   let moved = 0;
+  let held = 0;
   for (const lead of leads) {
     const person = byId.get(String(lead.assignedTo));
     const end = clockToMinutes(person?.workEnd || BUCKET_CUTOFF);
     const pastStaffEnd = end != null && nowMinutes >= end;
     const pastCutoff = cutoff != null && nowMinutes >= cutoff;
     if (!pastStaffEnd && !pastCutoff) continue;
+
+    // Keep with staff through the day after UTC was marked (retry next day if busy).
+    if (!utcHoldComplete(lead.statusChangedAt || lead.updatedAt, now, timeZone)) {
+      held += 1;
+      continue;
+    }
 
     const fromStaff = lead.assignedTo;
     lead.utcLastStaff = fromStaff;
@@ -62,22 +85,22 @@ async function moveUtcToBucketAfterWork() {
       fromStaff,
       toStaff: null,
       assignedBy: null,
-      reason: 'UTC returned to bucket after work hours',
+      reason: 'UTC returned to bucket after next-day hold',
       mode: 'manual',
     });
     await addActivity({
       lead,
       type: 'lead_reassigned',
       actor: null,
-      description: 'UTC moved to bucket after work end',
+      description: 'UTC moved to bucket after next-day hold',
       oldValue: fromStaff,
       newValue: null,
-      metadata: { reason: 'utc_bucket' },
+      metadata: { reason: 'utc_bucket', holdDays: 1 },
     });
     moved += 1;
   }
 
-  return { moved };
+  return { moved, held };
 }
 
 async function todaySheetAssignCounts(staffIds, timeZone, now) {
@@ -143,6 +166,7 @@ async function assignUtcLeadToStaff(lead, staff) {
       bucketStatus: 'assigned',
       status: 'fresh',
       statusChangedAt: now,
+      callQueueTier: lead.fromSheet ? 1 : 3,
       utcLastStaff: lead.utcLastStaff || lead.assignedTo || null,
     },
   }, { new: true });
@@ -211,10 +235,11 @@ async function autoAssignUtcLeads(options = {}) {
     isActive: true,
     role: { $in: ['STAFF', 'TEAM_LEADER'] },
     managingClients: { $exists: true, $ne: [] },
-  }).select('name role team branch workStart workEnd managingClients employmentStatus').lean();
+  }).select('name role team branch workStart workEnd managingClients employmentStatus autoAssignApplicable').lean();
 
   const working = staff.filter((person) => (
-    !onLeave.has(String(person._id))
+    person.autoAssignApplicable !== false
+    && !onLeave.has(String(person._id))
     && person.employmentStatus !== 'on_leave'
     && (options.ignoreWorkHours || isWithinWorkHours(person, now, timeZone))
     && Array.isArray(person.managingClients)

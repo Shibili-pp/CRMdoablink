@@ -341,7 +341,7 @@ async function ensureReferenceData() {
     { $setOnInsert: { ...status, isSystem: true, isActive: true } },
     { upsert: true }
   )));
-  for (const key of ['rnp', 'utc']) {
+  for (const key of ['rnp', 'utc', 'prospect', 'may_buy_later', 'dp_received', 'interested_to_buy', 'demo_confirmed', 'demo_rescheduled', 'demo_completed', 'demo_cancelled']) {
     const status = LEAD_STATUSES.find((item) => item.key === key);
     if (!status) continue;
     await CustomLeadStatus.updateOne(

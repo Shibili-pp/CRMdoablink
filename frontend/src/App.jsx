@@ -18,6 +18,7 @@ import LeadDetailPage from './pages/LeadDetailPage';
 import LeaderboardPage from './pages/LeaderboardPage';
 import AllLeadsPage from './pages/AllLeadsPage';
 import LeadsPage from './pages/LeadsPage';
+import PasskeyPage from './pages/PasskeyPage';
 import PipelinePage from './pages/PipelinePage';
 import LoginPage from './pages/LoginPage';
 import NotificationsPage from './pages/NotificationsPage';
@@ -54,6 +55,7 @@ export default function App() {
       <Route element={<Guard />}>
         <Route path="/" element={<Permit permission="dashboard.view"><DashboardPage /></Permit>} />
         <Route path="/all-leads" element={<Permit roles={['OWNER', 'SUPER_ADMIN']}><AllLeadsPage /></Permit>} />
+        <Route path="/passkey" element={<Permit roles={['OWNER']}><PasskeyPage /></Permit>} />
         <Route path="/leads" element={<Permit permission="leads.view"><LeadsPage /></Permit>} />
         <Route path="/pipeline" element={<Permit permission="leads.view"><PipelinePage /></Permit>} />
         <Route path="/leads/import" element={<Permit permission="leads.import"><ImportPage /></Permit>} />
@@ -66,7 +68,7 @@ export default function App() {
         <Route path="/calls" element={<Permit permission="calls.view"><CallsPage /></Permit>} />
         <Route path="/hourly-reports" element={<Permit permission="hourly.view"><HourlyPage /></Permit>} />
         <Route path="/staff" element={<Permit permission="staff.view"><StaffPage /></Permit>} />
-        <Route path="/users" element={<Permit permission="roles.manage"><UsersPage /></Permit>} />
+        <Route path="/users" element={<Permit roles={['OWNER']}><UsersPage /></Permit>} />
         <Route path="/targets" element={<Permit any={['targets.view', 'revenue.view']}><PerformancePage /></Permit>} />
         <Route path="/revenue" element={<Permit any={['targets.view', 'revenue.view']}><PerformancePage /></Permit>} />
         <Route path="/leaderboard" element={<Permit permission="leaderboard.view"><LeaderboardPage /></Permit>} />

@@ -10,6 +10,7 @@
     "seed:reset": "npm run seed:reset --prefix backend",
     "test": "npm test --prefix backend",
     "build": "npm run build --prefix frontend",
+    "sync:android-web": "powershell -ExecutionPolicy Bypass -File scripts/sync-android-web.ps1",
     "start": "npm start --prefix backend"
   },
   "devDependencies": {

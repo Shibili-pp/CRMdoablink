@@ -307,6 +307,7 @@ async function syncConnection(id, options = {}) {
         assignedTo: null,
         bucketStatus: 'unassigned',
         fromSheet: true,
+        callQueueTier: 1,
         sheetConnection: doc._id,
         sheetRowKey,
         status: fields.status || defaultStatus,

@@ -57,6 +57,8 @@ export default function LeadUpload({ onImported }) {
   const [firm, setFirm] = useState('');
   const [sources, setSources] = useState([]);
   const [source, setSource] = useState('');
+  const [staff, setStaff] = useState([]);
+  const [assignedTo, setAssignedTo] = useState('');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -66,6 +68,26 @@ export default function LeadUpload({ onImported }) {
       setSources(response.data.data.sources || []);
       if (response.data.data.importFields?.length) setFields(response.data.data.importFields.filter((field) => field.key !== 'source'));
     }).catch(() => {});
+    api.get('/api/v1/lead-assignments/workload').then((response) => {
+      const people = (response.data.data || [])
+        .filter((person) => person.available !== false)
+        .map((person) => ({
+          id: person.id || person._id,
+          name: person.name,
+          role: person.role,
+        }));
+      setStaff(people);
+    }).catch(() => {
+      api.get('/api/v1/users?limit=100').then((response) => {
+        setStaff((response.data.data || [])
+          .filter((person) => person.isActive !== false && ['STAFF', 'TEAM_LEADER'].includes(person.role))
+          .map((person) => ({
+            id: person.id || person._id,
+            name: person.name || person.username,
+            role: person.role,
+          })));
+      }).catch(() => {});
+    });
   }, []);
 
   const close = () => {
@@ -75,6 +97,7 @@ export default function LeadUpload({ onImported }) {
     setLeadRole('');
     setFirm('');
     setSource('');
+    setAssignedTo('');
   };
 
   const choose = async (event) => {
@@ -151,8 +174,14 @@ export default function LeadUpload({ onImported }) {
     }
     setBusy(true);
     try {
-      const response = await api.post(`/api/v1/lead-imports/${preview._id}/commit`, { skipDuplicates: true, updateExisting: false, leadRole, firm, source });
-      toast(`Imported ${response.data.data.summary.imported} leads into the bucket`);
+      const payload = { skipDuplicates: true, updateExisting: false, leadRole, firm, source };
+      if (assignedTo) payload.assignedTo = assignedTo;
+      const response = await api.post(`/api/v1/lead-imports/${preview._id}/commit`, payload);
+      const count = response.data.data.summary.imported;
+      const staffName = staff.find((person) => person.id === assignedTo)?.name;
+      toast(assignedTo
+        ? `Imported ${count} lead${count === 1 ? '' : 's'} and assigned to ${staffName || 'staff'}`
+        : `Imported ${count} lead${count === 1 ? '' : 's'} into the bucket`);
       close();
       onImported?.();
     } catch (error) {
@@ -236,7 +265,9 @@ export default function LeadUpload({ onImported }) {
                               ? (row.rowErrors || []).join(', ')
                               : isDuplicateRow(row)
                                 ? duplicateReason(row)
-                                : 'Ready'}
+                                : row.mapped?.statusFallback
+                                  ? `Ready · stage “${row.mapped.excelStage}” → Fresh`
+                                  : 'Ready'}
                           </td>
                         </tr>
                       ))}
@@ -291,6 +322,17 @@ export default function LeadUpload({ onImported }) {
                     {sources.map((item) => <option key={item}>{item}</option>)}
                   </select>
                 </Field>
+                <Field label="Assign lead to (optional)">
+                  <select aria-label="Assign lead to staff" value={assignedTo} onChange={(event) => setAssignedTo(event.target.value)}>
+                    <option value="">Leave in bucket (unassigned)</option>
+                    {staff.map((person) => (
+                      <option key={person.id} value={person.id}>
+                        {person.name}{person.role === 'TEAM_LEADER' ? ' · Team leader' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <p className="muted">Optional. Pick a staff member to assign every imported lead to them now, or leave blank to put them in the bucket.</p>
                 <button
                   className="btn"
                   type="button"
@@ -298,7 +340,11 @@ export default function LeadUpload({ onImported }) {
                   disabled={busy || !readyRows.length || duplicateRows.length > 0}
                   onClick={commit}
                 >
-                  {duplicateRows.length > 0 ? 'Remove duplicates to continue' : `Import ${readyRows.length} lead${readyRows.length === 1 ? '' : 's'} into the bucket`}
+                  {duplicateRows.length > 0
+                    ? 'Remove duplicates to continue'
+                    : assignedTo
+                      ? `Import ${readyRows.length} lead${readyRows.length === 1 ? '' : 's'} and assign to staff`
+                      : `Import ${readyRows.length} lead${readyRows.length === 1 ? '' : 's'} into the bucket`}
                 </button>
               </div>
             </>

@@ -11,7 +11,9 @@ const {
   leadScope, bucketScope, staffScope, combine, isElevated, hasPermission,
 } = require('./access');
 const { staffOnLeave } = require('./org');
-const { LOST_STATUSES } = require('../config/constants');
+const {
+  LOST_STATUSES, BUCKET_PARK_STATUSES, FOLLOWUP_GATE_STATUSES, DEMO_GATE_STATUSES, DEMO_OVER_STATUSES, DEMO_CANCEL_STATUSES,
+} = require('../config/constants');
 const { dateKeyOf, dayBounds, combineLocal } = require('../utils/time');
 
 const LEAD_SORT = ['createdAt', 'name', 'expectedRevenue', 'status', 'priority', 'priorityRank', 'followUpAt', 'leadCode', 'lastContactedAt', 'assignmentDate'];
@@ -82,8 +84,24 @@ async function buildLeadFilter(user, query, { bucket = false } = {}) {
   } else if (query.bucket === 'utc' || query.section === 'utc') {
     filter.status = 'utc';
     filter.assignedTo = null;
+  } else if (query.bucket === 'disqualified' || query.section === 'disqualified') {
+    filter.status = 'disqualified';
+    filter.assignedTo = null;
+  } else if (query.bucket === 'not_interested' || query.section === 'not_interested') {
+    filter.status = 'not_interested';
+    filter.assignedTo = null;
+  } else if (query.bucket === 'untouched' || query.section === 'untouched') {
+    filter.assignedTo = null;
+    filter.untouchedParkedAt = { $ne: null };
+    filter.status = { $in: ['fresh', 'not_contacted'] };
   } else if (bucket && query.section !== 'all') {
-    filter.status = { $nin: ['rnp', 'utc'] };
+    filter.status = { $nin: ['rnp', 'utc', 'disqualified', 'not_interested'] };
+    filter.$and = [...(filter.$and || []), {
+      $or: [
+        { untouchedParkedAt: null },
+        { untouchedParkedAt: { $exists: false } },
+      ],
+    }];
   }
   // Lead Management hides bucket leads. Owner/SA “All leads” (view=all) includes everything.
   if (!bucket && query.view !== 'all' && query.bucket !== 'unassigned' && query.bucket !== 'assigned' && !clean(query.staff)) {
@@ -116,6 +134,17 @@ async function buildLeadFilter(user, query, { bucket = false } = {}) {
 
 const STATUS_TOUCH_TYPES = ['status_changed', 'demo_completed', 'onboarding_completed'];
 
+const UNTOUCHED_SAME_STATUSES = ['fresh', 'not_contacted'];
+
+function isRealStatusTouch(activity) {
+  if (activity.type === 'demo_completed' || activity.type === 'onboarding_completed') return true;
+  if (activity.type !== 'status_changed' && activity.type !== 'lead_status_changed') return false;
+  const from = String(activity.oldValue || '');
+  const to = String(activity.newValue || '');
+  if (UNTOUCHED_SAME_STATUSES.includes(from) && UNTOUCHED_SAME_STATUSES.includes(to)) return false;
+  return true;
+}
+
 async function untouchedLeadIds(filter) {
   const leads = await Lead.find(filter).select('_id assignedTo assignmentDate createdAt').lean();
   const assigned = leads.filter((lead) => lead.assignedTo);
@@ -123,21 +152,106 @@ async function untouchedLeadIds(filter) {
   const activities = await LeadActivity.find({
     lead: { $in: assigned.map((lead) => lead._id) },
     type: { $in: STATUS_TOUCH_TYPES },
-  }).select('lead actor at').lean();
+  }).select('lead actor at type oldValue newValue').lean();
   const byLead = new Map(assigned.map((lead) => [String(lead._id), lead]));
   const touched = new Set();
   activities.forEach((activity) => {
     const lead = byLead.get(String(activity.lead));
     if (!lead || String(activity.actor) !== String(lead.assignedTo)) return;
     const since = new Date(lead.assignmentDate || lead.createdAt || 0).getTime();
-    if (new Date(activity.at).getTime() >= since) touched.add(String(lead._id));
+    if (new Date(activity.at).getTime() < since) return;
+    if (isRealStatusTouch(activity)) touched.add(String(lead._id));
   });
   return assigned.filter((lead) => !touched.has(String(lead._id))).map((lead) => lead._id);
+}
+
+async function enrichRnpStaffTrail(rows) {
+  if (!rows.length) return rows;
+  const leadIds = rows.map((row) => row._id);
+  const assignments = await LeadAssignment.find({ lead: { $in: leadIds } })
+    .sort({ createdAt: 1 })
+    .populate('fromStaff', 'name')
+    .populate('toStaff', 'name')
+    .lean();
+  const byLead = new Map();
+  assignments.forEach((row) => {
+    const key = String(row.lead);
+    if (!byLead.has(key)) byLead.set(key, []);
+    byLead.get(key).push(row);
+  });
+
+  return rows.map((lead) => {
+    const handlers = Array.isArray(lead.rnpHandlers) ? lead.rnpHandlers : [];
+    const latestHandler = handlers.length
+      ? handlers[handlers.length - 1]
+      : (lead.rnpLastStaff
+        ? { staff: lead.rnpLastStaff._id || lead.rnpLastStaff, name: lead.rnpLastStaff.name || '', markedAt: lead.rnpMarkedAt }
+        : null);
+
+    const seen = new Set();
+    const previous = [];
+    const pushPerson = (id, name) => {
+      if (!id) return;
+      const key = String(id);
+      if (seen.has(key)) return;
+      if (latestHandler && String(latestHandler.staff?._id || latestHandler.staff) === key) return;
+      seen.add(key);
+      previous.push({ id: key, name: name || 'Staff' });
+    };
+
+    // Earlier RNP markers (oldest → newest, excluding latest)
+    handlers.slice(0, -1).forEach((entry) => {
+      pushPerson(entry.staff?._id || entry.staff, entry.name);
+    });
+
+    // Assignment trail before parking in RNP bucket
+    (byLead.get(String(lead._id)) || []).forEach((row) => {
+      if (row.toStaff) pushPerson(row.toStaff._id || row.toStaff, row.toStaff.name);
+      if (row.fromStaff) pushPerson(row.fromStaff._id || row.fromStaff, row.fromStaff.name);
+    });
+
+    const latestName = latestHandler?.name
+      || latestHandler?.staff?.name
+      || lead.rnpLastStaff?.name
+      || '';
+    const previousNames = previous.map((person) => person.name).filter(Boolean);
+    const reachedAtRaw = latestHandler?.markedAt || lead.rnpMarkedAt || lead.statusChangedAt || null;
+    let rnpReachedAt = '';
+    let rnpReachedAtLabel = '';
+    if (reachedAtRaw) {
+      const when = new Date(reachedAtRaw);
+      if (!Number.isNaN(when.getTime())) {
+        rnpReachedAt = when.toISOString();
+        rnpReachedAtLabel = when.toLocaleString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+      }
+    }
+
+    return {
+      ...lead,
+      rnpLatestStaffName: latestName || '',
+      rnpPreviousStaffNames: previousNames,
+      rnpReachedAt,
+      rnpReachedAtLabel,
+      rnpStaffTrail: [
+        ...(rnpReachedAtLabel ? [`Reached RNP: ${rnpReachedAtLabel}`] : []),
+        ...(latestName ? [`Latest RNP: ${latestName}`] : []),
+        ...(previousNames.length ? [`Earlier: ${previousNames.join(' → ')}`] : []),
+      ].join(' · ') || '—',
+    };
+  });
 }
 
 async function list(user, query) {
   const bucket = query.view === 'bucket';
   const allView = query.view === 'all';
+  const rnpSection = bucket && (query.section === 'rnp' || query.bucket === 'rnp');
   const { page, limit, skip } = paging(query);
   const filter = await buildLeadFilter(user, query, { bucket });
   const sort = bucket
@@ -148,18 +262,21 @@ async function list(user, query) {
     if (query.touch === 'untouched') filter._id = { $in: ids };
     else if (ids.length) filter._id = { $nin: ids };
   }
+  let findQuery = Lead.find(filter)
+    .sort(sort)
+    .skip(skip)
+    .limit(limit)
+    .populate('assignedTo', 'name employeeId role')
+    .populate('team', 'name code')
+    .populate('branch', 'name code');
+  if (rnpSection) findQuery = findQuery.populate('rnpLastStaff', 'name employeeId role');
   const [rows, total] = await Promise.all([
-    Lead.find(filter)
-      .sort(sort)
-      .skip(skip)
-      .limit(limit)
-      .populate('assignedTo', 'name employeeId role')
-      .populate('team', 'name code')
-      .populate('branch', 'name code')
-      .lean(),
+    findQuery.lean(),
     Lead.countDocuments(filter),
   ]);
-  return { data: rows.map(presentLead), meta: metaFor(page, limit, total) };
+  const presented = rows.map(presentLead);
+  const data = rnpSection ? await enrichRnpStaffTrail(presented) : presented;
+  return { data, meta: metaFor(page, limit, total) };
 }
 
 function facetRows(rows, keyField = '_id') {
@@ -443,10 +560,13 @@ async function update(user, id, body, meta) {
     if (!sources.includes(patch.source)) throw new AppError('Choose a configured lead source', 422);
   }
   let statusMeta = null;
+  let parkToBucket = false;
   if (patch.status && patch.status !== lead.status) {
     statusMeta = await assertStatus(patch.status);
     if (LOST_STATUSES.includes(patch.status) || statusMeta.category === 'lost') {
-      if (!patch.lostReason && !lead.lostReason) throw new AppError('A lost reason is required', 422);
+      const reason = String(patch.lostReason || lead.lostReason || '').trim();
+      if (!reason) throw new AppError('Enter the reason for this status', 422);
+      patch.lostReason = reason;
     }
     patch.statusChangedAt = new Date();
     if (patch.status === 'rnp') {
@@ -455,7 +575,17 @@ async function update(user, id, body, meta) {
       patch.rnpNextCallAt = new Date(at.getTime() + (3 * 60 * 60 * 1000));
       patch.rnpLastNotifyAt = null;
       patch.rnpNotifyCount = 0;
-      if (lead.assignedTo) patch.rnpLastStaff = lead.assignedTo;
+      if (lead.assignedTo) {
+        patch.rnpLastStaff = lead.assignedTo;
+        const marker = await User.findById(lead.assignedTo).select('name').lean();
+        const history = Array.isArray(lead.rnpHandlers) ? [...lead.rnpHandlers] : [];
+        history.push({
+          staff: lead.assignedTo,
+          name: marker?.name || '',
+          markedAt: at,
+        });
+        patch.rnpHandlers = history.slice(-20);
+      }
     } else if (lead.status === 'rnp') {
       patch.rnpMarkedAt = null;
       patch.rnpNextCallAt = null;
@@ -464,6 +594,16 @@ async function update(user, id, body, meta) {
     }
     if (patch.status === 'utc') {
       if (lead.assignedTo) patch.utcLastStaff = lead.assignedTo;
+    }
+    if (BUCKET_PARK_STATUSES.includes(patch.status)) {
+      parkToBucket = true;
+      patch.assignedTo = null;
+      patch.bucketStatus = 'unassigned';
+      patch.assignmentDate = null;
+      patch.nextActionTitle = '';
+      patch.nextActionDueAt = null;
+      patch.followUpAt = null;
+      patch.inPipeline = false;
     }
   }
   if (patch.assignedTo && String(patch.assignedTo) !== String(lead.assignedTo || '')) {
@@ -475,21 +615,76 @@ async function update(user, id, body, meta) {
     patch.bucketStatus = 'assigned';
   }
   let demoDueAt = null;
-  if (patch.status === 'demo_booked' && patch.status !== lead.status) {
+  let demoTitle = 'Upcoming demo';
+  if (
+    patch.status
+    && patch.status !== lead.status
+    && DEMO_GATE_STATUSES.includes(patch.status)
+  ) {
     if (!body.demoDate || !body.demoTime) {
-      throw new AppError('Choose demo date and time', 422);
+      throw new AppError('Choose upcoming demo date and time', 422);
     }
     demoDueAt = combineLocal(body.demoDate, body.demoTime, general.timezone || 'Asia/Kolkata');
     if (Number.isNaN(demoDueAt.getTime())) throw new AppError('Invalid demo date or time', 422);
     if (demoDueAt.getTime() <= Date.now() - 60 * 1000) {
       throw new AppError('Demo time must be in the future', 422);
     }
+    if (patch.status === 'demo_confirmed') demoTitle = 'Upcoming demo · confirmed';
+    else if (patch.status === 'demo_rescheduled') demoTitle = 'Upcoming demo · rescheduled';
+    else demoTitle = 'Upcoming demo';
     patch.followUpAt = demoDueAt;
-    patch.nextActionTitle = 'Upcoming demo';
+    patch.nextActionTitle = demoTitle;
     patch.nextActionDueAt = demoDueAt;
+  }
+  let statusFollowUpAt = null;
+  let statusFollowUpTitle = '';
+  if (
+    patch.status
+    && patch.status !== lead.status
+    && FOLLOWUP_GATE_STATUSES.includes(patch.status)
+  ) {
+    if (!body.followUpDate || !body.followUpTime) {
+      throw new AppError('Choose follow-up date and time before setting this status', 422);
+    }
+    statusFollowUpAt = combineLocal(body.followUpDate, body.followUpTime, general.timezone || 'Asia/Kolkata');
+    if (Number.isNaN(statusFollowUpAt.getTime())) throw new AppError('Invalid follow-up date or time', 422);
+    statusFollowUpTitle = `Follow-up · ${statusMeta?.label || patch.status}`;
+    patch.followUpAt = statusFollowUpAt;
+    patch.nextActionTitle = statusFollowUpTitle;
+    patch.nextActionDueAt = statusFollowUpAt;
+  }
+  let demoOutcomeFollowUpAt = null;
+  let demoCancelReason = '';
+  if (
+    patch.status
+    && patch.status !== lead.status
+    && (DEMO_OVER_STATUSES.includes(patch.status) || DEMO_CANCEL_STATUSES.includes(patch.status))
+  ) {
+    if (!body.followUpDate || !body.followUpTime) {
+      throw new AppError('Choose the next follow-up date and time', 422);
+    }
+    if (DEMO_CANCEL_STATUSES.includes(patch.status)) {
+      demoCancelReason = String(body.cancelReason || '').trim();
+      if (demoCancelReason.length < 3) {
+        throw new AppError('Enter the reason for cancelling the demo', 422);
+      }
+    }
+    demoOutcomeFollowUpAt = combineLocal(body.followUpDate, body.followUpTime, general.timezone || 'Asia/Kolkata');
+    if (Number.isNaN(demoOutcomeFollowUpAt.getTime())) {
+      throw new AppError('Invalid follow-up date or time', 422);
+    }
+    statusFollowUpTitle = DEMO_CANCEL_STATUSES.includes(patch.status)
+      ? 'Follow-up after cancelled demo'
+      : 'Follow-up after demo';
+    patch.followUpAt = demoOutcomeFollowUpAt;
+    patch.nextActionTitle = statusFollowUpTitle;
+    patch.nextActionDueAt = demoOutcomeFollowUpAt;
   }
   delete patch.demoDate;
   delete patch.demoTime;
+  delete patch.followUpDate;
+  delete patch.followUpTime;
+  delete patch.cancelReason;
 
   const diff = changed(lead.toObject(), patch);
   Object.assign(lead, patch);
@@ -509,7 +704,7 @@ async function update(user, id, body, meta) {
       oldValue: diff.oldValues.status, newValue: patch.status,
     });
   }
-  if (demoDueAt && patch.status === 'demo_booked') {
+  if (demoDueAt && DEMO_GATE_STATUSES.includes(patch.status)) {
     await FollowUp.updateMany(
       { lead: lead._id, isDemo: true, status: 'pending' },
       { $set: { status: 'cancelled' } },
@@ -522,8 +717,8 @@ async function update(user, id, body, meta) {
       assignedTo: assignee,
       team: lead.team,
       branch: lead.branch,
-      title: 'Upcoming demo',
-      description: `Demo booked for ${body.demoDate} ${body.demoTime}`,
+      title: demoTitle,
+      description: `${statusMeta?.label || patch.status} for ${body.demoDate} ${body.demoTime}`,
       dueAt: demoDueAt,
       priority: 'high',
       createdBy: user._id,
@@ -533,21 +728,159 @@ async function update(user, id, body, meta) {
       lead,
       type: 'followup_created',
       actor: user,
-      description: `Demo booked for ${demoDueAt.toISOString()}`,
-      newValue: { followUpId: followUp.id, dueAt: demoDueAt, demo: true },
+      description: `${demoTitle} for ${demoDueAt.toISOString()}`,
+      newValue: { followUpId: followUp.id, dueAt: demoDueAt, demo: true, status: patch.status },
     });
     if (String(assignee) !== String(user._id)) {
       await notify({
         user: assignee,
         type: 'demo_booked',
-        title: 'Demo booked',
+        title: statusMeta?.label || 'Demo scheduled',
         body: `${lead.name} (${lead.leadCode}) · ${body.demoDate} ${body.demoTime}`,
         module: 'leads',
         recordId: lead.id,
       });
     }
   }
-  if (patch.assignedTo && diff.oldValues.assignedTo !== undefined) {
+  if (statusFollowUpAt && FOLLOWUP_GATE_STATUSES.includes(patch.status)) {
+    const assignee = lead.assignedTo || user._id;
+    const followUp = await FollowUp.create({
+      lead: lead._id,
+      leadName: lead.name,
+      leadCode: lead.leadCode,
+      assignedTo: assignee,
+      team: lead.team,
+      branch: lead.branch,
+      title: statusFollowUpTitle || 'Follow-up',
+      description: `Status set to ${statusMeta?.label || patch.status} · due ${body.followUpDate} ${body.followUpTime}`,
+      dueAt: statusFollowUpAt,
+      priority: 'medium',
+      createdBy: user._id,
+      isDemo: false,
+    });
+    await addActivity({
+      lead,
+      type: 'followup_created',
+      actor: user,
+      description: `${statusFollowUpTitle} due ${statusFollowUpAt.toISOString()}`,
+      newValue: { followUpId: followUp.id, dueAt: statusFollowUpAt, status: patch.status },
+    });
+    if (String(assignee) !== String(user._id)) {
+      await notify({
+        user: assignee,
+        type: 'followup_assigned',
+        title: 'New follow-up',
+        body: `${lead.name}: ${statusFollowUpTitle}`,
+        module: 'followups',
+        recordId: followUp.id,
+      });
+    }
+  }
+  if (demoOutcomeFollowUpAt && (DEMO_OVER_STATUSES.includes(patch.status) || DEMO_CANCEL_STATUSES.includes(patch.status))) {
+    const now = new Date();
+    const assignee = lead.assignedTo || user._id;
+    const pendingDemos = await FollowUp.updateMany(
+      { lead: lead._id, isDemo: true, status: 'pending' },
+      {
+        $set: DEMO_OVER_STATUSES.includes(patch.status)
+          ? {
+            status: 'completed',
+            completedAt: now,
+            completedOnTime: true,
+            completionNotes: 'Demo over',
+          }
+          : {
+            status: 'cancelled',
+            completedAt: now,
+            completionNotes: demoCancelReason,
+          },
+      },
+    );
+    if (!pendingDemos.modifiedCount) {
+      await FollowUp.create({
+        lead: lead._id,
+        leadName: lead.name,
+        leadCode: lead.leadCode,
+        assignedTo: assignee,
+        team: lead.team,
+        branch: lead.branch,
+        title: DEMO_OVER_STATUSES.includes(patch.status) ? 'Demo over' : 'Demo cancelled',
+        description: DEMO_CANCEL_STATUSES.includes(patch.status) ? demoCancelReason : 'Demo marked over',
+        dueAt: now,
+        priority: 'high',
+        createdBy: user._id,
+        isDemo: true,
+        status: DEMO_OVER_STATUSES.includes(patch.status) ? 'completed' : 'cancelled',
+        completedAt: now,
+        completedOnTime: true,
+        completionNotes: DEMO_CANCEL_STATUSES.includes(patch.status) ? demoCancelReason : 'Demo over',
+      });
+    }
+    const followUp = await FollowUp.create({
+      lead: lead._id,
+      leadName: lead.name,
+      leadCode: lead.leadCode,
+      assignedTo: assignee,
+      team: lead.team,
+      branch: lead.branch,
+      title: statusFollowUpTitle || 'Follow-up',
+      description: DEMO_CANCEL_STATUSES.includes(patch.status)
+        ? `Demo cancelled · ${demoCancelReason}`
+        : `After demo over · due ${body.followUpDate} ${body.followUpTime}`,
+      dueAt: demoOutcomeFollowUpAt,
+      priority: 'medium',
+      createdBy: user._id,
+      isDemo: false,
+    });
+    await addActivity({
+      lead,
+      type: 'followup_created',
+      actor: user,
+      description: `${statusFollowUpTitle} due ${demoOutcomeFollowUpAt.toISOString()}`,
+      newValue: {
+        followUpId: followUp.id,
+        dueAt: demoOutcomeFollowUpAt,
+        status: patch.status,
+        cancelReason: demoCancelReason || undefined,
+      },
+    });
+    if (String(assignee) !== String(user._id)) {
+      await notify({
+        user: assignee,
+        type: 'followup_assigned',
+        title: 'New follow-up',
+        body: `${lead.name}: ${statusFollowUpTitle}`,
+        module: 'followups',
+        recordId: followUp.id,
+      });
+    }
+  }
+  if (parkToBucket) {
+    const previousStaff = diff.oldValues.assignedTo || null;
+    if (previousStaff) {
+      await LeadAssignment.create({
+        lead: lead._id,
+        fromStaff: previousStaff,
+        toStaff: null,
+        assignedBy: user._id,
+        reason: patch.lostReason || `${statusMeta?.label || patch.status} · returned to bucket`,
+        mode: 'manual',
+      });
+    }
+    await FollowUp.updateMany(
+      { lead: lead._id, status: { $in: ['pending', 'missed'] } },
+      { $set: { status: 'cancelled', completionNotes: patch.lostReason || 'Lead parked in bucket' } },
+    );
+    await addActivity({
+      lead,
+      type: 'lead_reassigned',
+      actor: user,
+      description: `Moved to bucket · ${statusMeta?.label || patch.status}${patch.lostReason ? ` · ${patch.lostReason}` : ''}`,
+      oldValue: previousStaff,
+      newValue: null,
+      metadata: { parkStatus: patch.status, lostReason: patch.lostReason || '' },
+    });
+  } else if (patch.assignedTo && diff.oldValues.assignedTo !== undefined) {
     await LeadAssignment.create({
       lead: lead._id,
       fromStaff: diff.oldValues.assignedTo || null,
@@ -836,6 +1169,9 @@ async function bulkStatus(user, body, meta) {
 }
 
 async function bulkRemove(user, body, meta) {
+  if (body.protect) {
+    await require('./deletePasskey').assertDeletePasskey(body.passkey);
+  }
   const results = [];
   let deleted = 0;
   for (const id of body.leadIds) {
@@ -913,6 +1249,11 @@ async function assignOne(user, { leadId, toStaff, reason, mode, expectedStaffId,
   const reassigningToOther = Boolean(staff) && lead.assignedTo && String(lead.assignedTo) !== String(staff._id);
   // New staff always sees the lead as fresh (RNP/UTC was for the previous owner only).
   const presentAsFresh = assigningFromBucket || (reassigningToOther && ['rnp', 'utc'].includes(lead.status));
+  const assignMode = mode || 'manual';
+  const { resolveCallQueueTier } = require('../utils/callQueue');
+  const callQueueTier = staff
+    ? resolveCallQueueTier({ fromSheet: Boolean(lead.fromSheet), mode: assignMode, role: user.role })
+    : (lead.callQueueTier || 3);
   const updated = await Lead.findOneAndUpdate(filter, {
     $set: {
       assignedTo: staff ? staff._id : null,
@@ -920,6 +1261,7 @@ async function assignOne(user, { leadId, toStaff, reason, mode, expectedStaffId,
       branch: staff?.branch || lead.branch,
       assignmentDate: staff ? new Date() : lead.assignmentDate,
       bucketStatus: staff ? 'assigned' : 'unassigned',
+      ...(staff ? { untouchedParkedAt: null, callQueueTier } : {}),
       ...(presentAsFresh ? {
         status: 'fresh',
         statusChangedAt: new Date(),
@@ -1034,10 +1376,16 @@ async function workload(user) {
     } },
   ]);
   const byId = new Map(counts.map((row) => [String(row._id), row]));
+  const holdAssigned = await require('./assignAllow').isHoldAssignedOn();
   return {
     data: people.map((person) => {
       const row = byId.get(String(person._id)) || { open: 0, fresh: 0 };
       const leave = onLeave.has(String(person._id)) || person.employmentStatus === 'on_leave';
+      const capacity = person.maxLeadAllocation || 50;
+      // During Owner hold: reassign/assign is not blocked by open-lead capacity.
+      const remaining = holdAssigned
+        ? Math.max(9999, capacity)
+        : Math.max(0, capacity - row.open);
       return {
         id: person._id,
         name: person.name,
@@ -1045,8 +1393,9 @@ async function workload(user) {
         team: person.team,
         openLeads: row.open,
         freshLeads: row.fresh,
-        capacity: person.maxLeadAllocation || 50,
-        remaining: Math.max(0, (person.maxLeadAllocation || 50) - row.open),
+        capacity,
+        remaining,
+        holdAssigned,
         available: !leave && person.employmentStatus === 'active',
       };
     }),
@@ -1281,6 +1630,9 @@ async function updatePipeline(user, id, body, meta) {
       lostReason: body.lostReason || '',
       demoDate: body.demoDate,
       demoTime: body.demoTime,
+      followUpDate: body.followUpDate,
+      followUpTime: body.followUpTime,
+      cancelReason: body.cancelReason,
     }, meta);
   }
   const lead = await findInScope(user, id);
@@ -1354,27 +1706,65 @@ async function pipelineReport(user, query) {
   return { data: reports, meta: { view: user.role === 'STAFF' || query.staff ? 'staff' : 'all', staff: people } };
 }
 
+let callQueueTierBackfilled = false;
+async function ensureCallQueueTiers() {
+  if (callQueueTierBackfilled) return;
+  await Lead.updateMany(
+    { deletedAt: null, fromSheet: true, callQueueTier: { $ne: 1 } },
+    { $set: { callQueueTier: 1 } },
+  );
+  await Lead.updateMany(
+    { deletedAt: null, $or: [{ callQueueTier: null }, { callQueueTier: { $exists: false } }] },
+    { $set: { callQueueTier: 3 } },
+  );
+  callQueueTierBackfilled = true;
+}
+
 /** Leads staff must dial today: assigned today (Asia/Kolkata) Fresh or due RNP. */
 async function todayCallQueue(user, query = {}) {
+  const { CALLS_TODAY_HOLD_STATUSES } = require('./dailyCapacity');
   const timezone = 'Asia/Kolkata';
   const todayKey = dateKeyOf(new Date(), timezone);
   const { start, end } = dayBounds(todayKey, timezone);
-  const now = new Date();
   const { page, limit, skip } = paging(query);
+  await ensureCallQueueTiers();
+
+  // Owner Hold assigned leads: CRM setup mode — dial list paused; Lead Management keeps leads.
+  if (await require('./assignAllow').isHoldAssignedOn()) {
+    return {
+      data: [],
+      meta: {
+        ...metaFor(page, limit, 0),
+        date: todayKey,
+        timezone,
+        summary: {
+          toCall: 0,
+          highPriority: 0,
+          freshHold: 0,
+          rnpDue: 0,
+          rnpHold: 0,
+          utcHold: 0,
+          sheetToday: 0,
+          dailyTarget: 120,
+          holdAssigned: true,
+        },
+      },
+    };
+  }
+
+  // Stay on Calls Today until hold ends and lead returns to bucket (or status changes).
   const base = {
     deletedAt: null,
     assignedTo: clean(query.staff) || { $ne: null },
-    $or: [
-      { status: 'fresh', assignmentDate: { $gte: start, $lt: end } },
-      { status: 'rnp', $or: [{ assignmentDate: { $gte: start, $lt: end } }, { rnpNextCallAt: { $lte: now } }] },
-      { status: 'utc', assignmentDate: { $gte: start, $lt: end } },
-    ],
+    status: { $in: CALLS_TODAY_HOLD_STATUSES },
   };
   const filter = await combine(base, leadScope(user));
+  const staffFilter = clean(query.staff) || { $ne: null };
 
-  const [rows, total, highPriority, rnpDue] = await Promise.all([
+  const [rows, total, highPriority, freshHold, rnpHold, utcHold, sheetToday] = await Promise.all([
     Lead.find(filter)
-      .sort({ priorityRank: -1, assignmentDate: -1, createdAt: -1 })
+      // 1) inbound/sheet + priority · 2) Admin+ manual + priority · 3) other + priority
+      .sort({ callQueueTier: 1, fromSheet: -1, priorityRank: -1, assignmentDate: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .populate('assignedTo', 'name employeeId role')
@@ -1384,9 +1774,24 @@ async function todayCallQueue(user, query = {}) {
     Lead.countDocuments({ ...filter, priority: { $in: ['high', 'urgent'] } }),
     Lead.countDocuments(await combine({
       deletedAt: null,
-      assignedTo: clean(query.staff) || { $ne: null },
+      assignedTo: staffFilter,
+      status: { $in: ['fresh', 'not_contacted'] },
+    }, leadScope(user))),
+    Lead.countDocuments(await combine({
+      deletedAt: null,
+      assignedTo: staffFilter,
       status: 'rnp',
-      $or: [{ assignmentDate: { $gte: start, $lt: end } }, { rnpNextCallAt: { $lte: now } }],
+    }, leadScope(user))),
+    Lead.countDocuments(await combine({
+      deletedAt: null,
+      assignedTo: staffFilter,
+      status: 'utc',
+    }, leadScope(user))),
+    Lead.countDocuments(await combine({
+      deletedAt: null,
+      assignedTo: staffFilter,
+      fromSheet: true,
+      assignmentDate: { $gte: start, $lt: end },
     }, leadScope(user))),
   ]);
 
@@ -1399,10 +1804,24 @@ async function todayCallQueue(user, query = {}) {
       summary: {
         toCall: total,
         highPriority,
-        rnpDue,
+        freshHold,
+        rnpDue: rnpHold,
+        rnpHold,
+        utcHold,
+        sheetToday,
+        dailyTarget: 120,
+        holdAssigned: false,
       },
     },
   };
+}
+
+async function allLeadIds(user, query = {}) {
+  if (!isElevated(user)) throw new AppError('Only Owner or Super Admin can select all leads', 403);
+  const filter = await buildLeadFilter(user, { ...query, view: 'all' }, { bucket: false });
+  const rows = await Lead.find(filter).select('_id').limit(5000).lean();
+  const ids = rows.map((row) => String(row._id));
+  return { data: { ids, total: ids.length } };
 }
 
 module.exports = {
@@ -1410,6 +1829,7 @@ module.exports = {
   presentLead,
   list,
   allLeadFacets,
+  allLeadIds,
   getById,
   create,
   update,

@@ -62,6 +62,9 @@ const userSchema = new Schema({
   workStart: { type: String, default: '' },
   workEnd: { type: String, default: '' },
   managingClients: { type: [String], default: [] },
+  managingFirms: { type: [String], default: [] },
+  /** When false, this staff is skipped by sheet / RNP / UTC / bulk auto-assign. Default ON. */
+  autoAssignApplicable: { type: Boolean, default: true, index: true },
   deletedAt: { type: Date, default: null, index: true },
 }, { timestamps: true });
 
@@ -101,6 +104,15 @@ const leadSchema = new Schema({
   rnpLastNotifyAt: Date,
   rnpNotifyCount: { type: Number, default: 0 },
   rnpLastStaff: { type: Schema.Types.ObjectId, ref: 'User', index: true, default: null },
+  /** Staff who marked this lead RNP, newest last. */
+  rnpHandlers: {
+    type: [{
+      staff: { type: Schema.Types.ObjectId, ref: 'User' },
+      name: { type: String, default: '' },
+      markedAt: { type: Date, default: Date.now },
+    }],
+    default: [],
+  },
   utcLastStaff: { type: Schema.Types.ObjectId, ref: 'User', index: true, default: null },
   nextActionTitle: String,
   nextActionDueAt: Date,
@@ -123,6 +135,12 @@ const leadSchema = new Schema({
   sheetConnection: { type: Schema.Types.ObjectId, ref: 'SheetConnection', index: true },
   sheetRowKey: { type: String, default: '' },
   importBatch: { type: Schema.Types.ObjectId, ref: 'LeadImport' },
+  /**
+   * Calls Today sort tier: 1 = inbound/sheet, 2 = Admin+ manual assign, 3 = other (auto / TL).
+   */
+  callQueueTier: { type: Number, enum: [1, 2, 3], default: 3, index: true },
+  /** Set when Fresh/Not Contacted stayed untouched for 3 working days and returned to bucket. */
+  untouchedParkedAt: { type: Date, default: null, index: true },
   deletedAt: { type: Date, default: null, index: true },
 }, { timestamps: true });
 leadSchema.index({ deletedAt: 1, assignedTo: 1, status: 1 });

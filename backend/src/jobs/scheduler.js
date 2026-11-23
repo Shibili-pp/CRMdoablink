@@ -9,7 +9,7 @@ const { autoAssignSheetLeads } = require('../services/autoAssign');
 const { applyWeekendAutoAssignRule } = require('../services/assignAllow');
 const { processRnpReminders, moveRnpToBucketAfterWork } = require('../services/rnp');
 const { moveUtcToBucketAfterWork } = require('../services/utc');
-const { moveStaleFreshToUtcBucket } = require('../services/freshAging');
+const { moveStaleUntouchedToBucket } = require('../services/freshAging');
 const { zonedParts, dateKeyFromDate, addCalendarDays } = require('../utils/time');
 
 function startJobs() {
@@ -33,12 +33,16 @@ function startJobs() {
       await scan();
       const rnp = await processRnpReminders();
       if (rnp.notified) console.log(`RNP reminders: ${rnp.notified}`);
+      // Bucket moves only while Auto assigning is ON (checked inside each mover).
       const moved = await moveRnpToBucketAfterWork();
       if (moved.moved) console.log(`RNP to bucket: ${moved.moved}`);
+      else if (moved.blocked) { /* auto-assign off — staff keep leads */ }
       const utcMoved = await moveUtcToBucketAfterWork();
       if (utcMoved.moved) console.log(`UTC to bucket: ${utcMoved.moved}`);
-      const staleFresh = await moveStaleFreshToUtcBucket();
-      if (staleFresh.moved) console.log(`Fresh → UTC bucket (2-day hold): ${staleFresh.moved}`);
+      const staleUntouched = await moveStaleUntouchedToBucket();
+      if (staleUntouched.moved) {
+        console.log(`Untouched/Fresh/Not Contacted → bucket (3 working days): ${staleUntouched.moved}`);
+      }
     } catch (error) {
       console.error('Reminder job failed:', error.message);
     }

@@ -6,7 +6,7 @@ const { AppError, paging, metaFor, escapeRegex, sortFrom } = require('../utils/h
 const { normalizePhone, isValidPhone } = require('../utils/phone');
 const { recordAudit } = require('./audit');
 const { notify } = require('./notify');
-const { roleTemplate, getLeadRoles, getGeneral } = require('./settings');
+const { roleTemplate, getLeadRoles, getLeadFirms, getGeneral } = require('./settings');
 const { canManageRole, staffScope, combine, isElevated, hasPermission } = require('./access');
 const { publicUser } = require('./auth');
 
@@ -18,6 +18,17 @@ async function resolveManagingClients(keys) {
   const next = [...new Set(list.map((key) => String(key || '').trim()).filter(Boolean))];
   const invalid = next.filter((key) => !allowedKeys.has(key));
   if (invalid.length) throw new AppError('Choose managing clients from the preset list', 422);
+  return next;
+}
+
+async function resolveManagingFirms(keys) {
+  if (keys == null) return undefined;
+  const list = Array.isArray(keys) ? keys : [];
+  const allowed = await getLeadFirms();
+  const allowedKeys = new Set(allowed.map((item) => item.key));
+  const next = [...new Set(list.map((key) => String(key || '').trim().toLowerCase()).filter(Boolean))];
+  const invalid = next.filter((key) => !allowedKeys.has(key));
+  if (invalid.length) throw new AppError('Choose managing firms from the preset list', 422);
   return next;
 }
 
@@ -105,6 +116,7 @@ async function createUser(actor, body, meta) {
   const workEnd = workClock(body.workEnd, '20:00');
   assertShift(workStart, workEnd);
   const managingClients = await resolveManagingClients(body.managingClients || []);
+  const managingFirms = await resolveManagingFirms(body.managingFirms || []);
   const user = await User.create({
     username,
     email,
@@ -127,10 +139,12 @@ async function createUser(actor, body, meta) {
     workStart,
     workEnd,
     managingClients,
+    managingFirms,
+    autoAssignApplicable: body.autoAssignApplicable !== false,
   });
   await recordAudit({
     user: actor._id, username: actor.username, action: 'user.create', module: 'users', recordId: user.id,
-    newValues: { username: user.username, role: user.role, team, branch, managingClients }, ...meta,
+    newValues: { username: user.username, role: user.role, team, branch, managingClients, managingFirms, autoAssignApplicable: user.autoAssignApplicable }, ...meta,
   });
   return { data: publicUser(user), message: 'User created', status: 201 };
 }
@@ -191,6 +205,12 @@ async function updateUser(actor, id, body, meta) {
   }
   if (body.managingClients !== undefined) {
     user.managingClients = await resolveManagingClients(body.managingClients);
+  }
+  if (body.managingFirms !== undefined) {
+    user.managingFirms = await resolveManagingFirms(body.managingFirms);
+  }
+  if (body.autoAssignApplicable !== undefined) {
+    user.autoAssignApplicable = Boolean(body.autoAssignApplicable);
   }
   await user.save();
   await recordAudit({

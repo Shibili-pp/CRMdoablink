@@ -1,57 +1,146 @@
-const { Lead, LeadAssignment } = require('../models');
+const { Lead, LeadAssignment, LeadActivity } = require('../models');
 const { getGeneral } = require('./settings');
 const { addActivity } = require('./activity');
-const { zonedParts, dateKeyFromDate, dayBounds, addCalendarDays } = require('../utils/time');
+const {
+  zonedParts, dateKeyFromDate, dayBounds, addCalendarDays, weekdayIndex, wallTimeToUtc,
+} = require('../utils/time');
 
-const FRESH_HOLD_DAYS = 2;
+/** Fresh / Not Contacted / Untouched — same hold rule. */
+const UNTOUCHED_STATUSES = ['fresh', 'not_contacted'];
+const UNTOUCHED_HOLD_WORKING_DAYS = 3;
+const STATUS_TOUCH_TYPES = ['status_changed', 'demo_completed', 'onboarding_completed'];
 
 /**
- * Fresh leads stay with staff for 2 calendar days (Calls today).
- * If still fresh after that → move to bucket as UTC for automatic reassign.
- * (RNP/UTC status changes still follow same-day hold → after-work bucket → next-day rotate.)
+ * Start of the calendar day after `workingDays` working days have been counted
+ * from `fromDate` (assignment day counts as day 1 if it is not Sunday).
+ * Sunday is not a working day.
  */
-function assignmentCutoff(now, timeZone, holdDays = FRESH_HOLD_DAYS) {
-  const parts = zonedParts(now, timeZone);
-  const cutoffDay = addCalendarDays(parts.year, parts.month, parts.day, -(holdDays));
-  const key = `${cutoffDay.year}-${String(cutoffDay.month).padStart(2, '0')}-${String(cutoffDay.day).padStart(2, '0')}`;
-  const { end } = dayBounds(key, timeZone);
-  // assignmentDate strictly before start of (today - holdDays + 1) ≡ on or before today-holdDays
-  // Using end of cutoff day: assigned on Mon, holdDays=2, on Wed cutoff end-of-Mon → assigned Mon is < end of Mon? 
-  // Better: assignedAt < start of (today - (holdDays - 1))? 
-  // Assigned Monday, today Wednesday: days apart = 2 → move.
-  // cutoff = start of (today - 1) = start of Tuesday → Monday assignment < Tuesday start → move. Good.
-  // Assigned Tuesday, today Wednesday: Tuesday >= Tuesday start → keep.
-  const keepFrom = addCalendarDays(parts.year, parts.month, parts.day, -(holdDays - 1));
-  const keepKey = `${keepFrom.year}-${String(keepFrom.month).padStart(2, '0')}-${String(keepFrom.day).padStart(2, '0')}`;
-  const { start } = dayBounds(keepKey, timeZone);
-  return start;
+function deadlineAfterWorkingDays(fromDate, workingDays, timeZone) {
+  let parts = zonedParts(new Date(fromDate), timeZone);
+  let counted = 0;
+  for (let guard = 0; guard < 40; guard += 1) {
+    const noon = wallTimeToUtc(parts.year, parts.month, parts.day, 12, 0, 0, timeZone);
+    const wd = weekdayIndex(noon, timeZone);
+    if (wd !== 0) {
+      counted += 1;
+      if (counted >= workingDays) {
+        const next = addCalendarDays(parts.year, parts.month, parts.day, 1);
+        return wallTimeToUtc(next.year, next.month, next.day, 0, 0, 0, timeZone);
+      }
+    }
+    parts = addCalendarDays(parts.year, parts.month, parts.day, 1);
+  }
+  return new Date();
 }
 
-async function moveStaleFreshToUtcBucket() {
+/** Leads assigned before this instant have completed the 3 working-day hold. */
+function assignmentCutoff(now, timeZone, holdDays = UNTOUCHED_HOLD_WORKING_DAYS) {
+  // Walk backward from yesterday to find a start-of-day cutoff spanning holdDays working days.
+  let parts = zonedParts(now, timeZone);
+  parts = addCalendarDays(parts.year, parts.month, parts.day, -1);
+  let counted = 0;
+  for (let guard = 0; guard < 40; guard += 1) {
+    const noon = wallTimeToUtc(parts.year, parts.month, parts.day, 12, 0, 0, timeZone);
+    const wd = weekdayIndex(noon, timeZone);
+    if (wd !== 0) {
+      counted += 1;
+      if (counted >= holdDays) {
+        const { start } = dayBounds(
+          `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`,
+          timeZone,
+        );
+        return start;
+      }
+    }
+    parts = addCalendarDays(parts.year, parts.month, parts.day, -1);
+  }
+  return dayBounds(dateKeyFromDate(now, timeZone), timeZone).start;
+}
+
+function isRealTouch(activity) {
+  if (activity.type === 'demo_completed' || activity.type === 'onboarding_completed') return true;
+  if (activity.type !== 'status_changed' && activity.type !== 'lead_status_changed') return false;
+  const from = String(activity.oldValue || '');
+  const to = String(activity.newValue || '');
+  // Fresh ↔ Not Contacted are the same untouched concept — not a real touch.
+  if (UNTOUCHED_STATUSES.includes(from) && UNTOUCHED_STATUSES.includes(to)) return false;
+  return true;
+}
+
+async function stillUntouchedByAssignee(lead) {
+  const since = new Date(lead.assignmentDate || lead.createdAt || 0).getTime();
+  const activities = await LeadActivity.find({
+    lead: lead._id,
+    type: { $in: STATUS_TOUCH_TYPES },
+    actor: lead.assignedTo,
+    at: { $gte: new Date(since) },
+  }).select('type oldValue newValue').lean();
+  return !activities.some(isRealTouch);
+}
+
+/**
+ * Fresh / Not Contacted stay with staff for 3 working days (Sun off).
+ * If still untouched → park in bucket Untouched calls (not UTC).
+ */
+async function moveStaleUntouchedToBucket() {
+  const assignAllow = require('./assignAllow');
+  if (await assignAllow.isHoldAssignedOn()) {
+    return {
+      moved: 0,
+      holdWorkingDays: UNTOUCHED_HOLD_WORKING_DAYS,
+      blocked: true,
+      reason: 'hold_assigned_on',
+    };
+  }
+  if (!(await assignAllow.isAutoAssignOn())) {
+    return {
+      moved: 0,
+      holdWorkingDays: UNTOUCHED_HOLD_WORKING_DAYS,
+      blocked: true,
+      reason: 'auto_assign_off',
+    };
+  }
   const general = await getGeneral();
   const timeZone = general.timezone || 'Asia/Kolkata';
   const now = new Date();
-  const cutoff = assignmentCutoff(now, timeZone, FRESH_HOLD_DAYS);
+  const cutoff = assignmentCutoff(now, timeZone, UNTOUCHED_HOLD_WORKING_DAYS);
 
   const leads = await Lead.find({
     deletedAt: null,
-    status: 'fresh',
+    status: { $in: UNTOUCHED_STATUSES },
     assignedTo: { $ne: null },
     assignmentDate: { $ne: null, $lt: cutoff },
+    $or: [
+      { untouchedParkedAt: null },
+      { untouchedParkedAt: { $exists: false } },
+    ],
   }).limit(400);
 
-  if (!leads.length) return { moved: 0, holdDays: FRESH_HOLD_DAYS, cutoff: cutoff.toISOString() };
+  if (!leads.length) {
+    return {
+      moved: 0,
+      holdWorkingDays: UNTOUCHED_HOLD_WORKING_DAYS,
+      cutoff: cutoff.toISOString(),
+    };
+  }
 
   let moved = 0;
+  let skippedTouched = 0;
   for (const lead of leads) {
+    if (!(await stillUntouchedByAssignee(lead))) {
+      skippedTouched += 1;
+      continue;
+    }
+    // Exact check: 3 working days from this lead's assignment must be complete.
+    const deadline = deadlineAfterWorkingDays(lead.assignmentDate, UNTOUCHED_HOLD_WORKING_DAYS, timeZone);
+    if (now < deadline) continue;
+
     const fromStaff = lead.assignedTo;
-    lead.utcLastStaff = fromStaff;
-    lead.status = 'utc';
-    lead.statusChangedAt = now;
     lead.assignedTo = null;
     lead.team = null;
     lead.bucketStatus = 'unassigned';
     lead.assignmentDate = null;
+    lead.untouchedParkedAt = now;
     await lead.save();
 
     await LeadAssignment.create({
@@ -59,31 +148,44 @@ async function moveStaleFreshToUtcBucket() {
       fromStaff,
       toStaff: null,
       assignedBy: null,
-      reason: `Fresh held ${FRESH_HOLD_DAYS} days with no RNP/UTC — moved to UTC bucket for reassign`,
+      reason: `Untouched / Fresh / Not Contacted held ${UNTOUCHED_HOLD_WORKING_DAYS} working days — moved to Untouched calls bucket`,
       mode: 'manual',
     });
     await addActivity({
       lead,
-      type: 'lead_status_changed',
+      type: 'lead_reassigned',
       actor: null,
-      description: `Fresh after ${FRESH_HOLD_DAYS} days → UTC bucket for automatic reassign`,
-      oldValue: { status: 'fresh', assignedTo: fromStaff },
-      newValue: { status: 'utc', assignedTo: null },
-      metadata: { reason: 'fresh_aged_utc_bucket', holdDays: FRESH_HOLD_DAYS },
+      description: `Still untouched after ${UNTOUCHED_HOLD_WORKING_DAYS} working days → Untouched calls bucket`,
+      oldValue: { status: lead.status, assignedTo: fromStaff },
+      newValue: { status: lead.status, assignedTo: null },
+      metadata: {
+        reason: 'untouched_park_bucket',
+        holdWorkingDays: UNTOUCHED_HOLD_WORKING_DAYS,
+      },
     });
     moved += 1;
   }
 
   return {
     moved,
-    holdDays: FRESH_HOLD_DAYS,
+    skippedTouched,
+    holdWorkingDays: UNTOUCHED_HOLD_WORKING_DAYS,
     cutoff: cutoff.toISOString(),
     dateKey: dateKeyFromDate(now, timeZone),
   };
 }
 
+/** @deprecated Use moveStaleUntouchedToBucket — Fresh no longer goes to UTC. */
+async function moveStaleFreshToUtcBucket() {
+  return moveStaleUntouchedToBucket();
+}
+
 module.exports = {
-  FRESH_HOLD_DAYS,
+  FRESH_HOLD_DAYS: UNTOUCHED_HOLD_WORKING_DAYS,
+  UNTOUCHED_HOLD_WORKING_DAYS,
+  UNTOUCHED_STATUSES,
   assignmentCutoff,
+  deadlineAfterWorkingDays,
+  moveStaleUntouchedToBucket,
   moveStaleFreshToUtcBucket,
 };

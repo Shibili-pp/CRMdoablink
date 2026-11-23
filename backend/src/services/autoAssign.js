@@ -150,6 +150,9 @@ async function assignSheetLeadToStaff(lead, staff, reason) {
       bucketStatus: 'assigned',
       status: 'fresh',
       statusChangedAt: new Date(),
+      untouchedParkedAt: null,
+      // Sheet inbound = Calls Today tier 1; bulk auto = tier 3
+      callQueueTier: lead.fromSheet ? 1 : 3,
     },
   }, { new: true });
   if (!updated) return { ok: false, conflict: true };
@@ -235,10 +238,11 @@ async function autoAssignSheetLeads(options = {}) {
     isActive: true,
     role: { $in: ['STAFF', 'TEAM_LEADER'] },
     managingClients: { $exists: true, $ne: [] },
-  }).select('name role team branch maxLeadAllocation workStart workEnd managingClients employmentStatus').lean();
+  }).select('name role team branch maxLeadAllocation workStart workEnd managingClients employmentStatus autoAssignApplicable').lean();
 
   const working = staff.filter((person) => (
-    !onLeave.has(String(person._id))
+    person.autoAssignApplicable !== false
+    && !onLeave.has(String(person._id))
     && person.employmentStatus !== 'on_leave'
     && (options.ignoreWorkHours || isWithinWorkHours(person, now, timeZone))
     && Array.isArray(person.managingClients)
@@ -324,8 +328,12 @@ async function autoAssignBulkLeads(options = {}) {
     deletedAt: null,
     assignedTo: null,
     fromSheet: { $ne: true },
-    status: { $nin: ['rnp', 'utc'] },
+    status: { $nin: ['rnp', 'utc', 'disqualified', 'not_interested'] },
     leadRole: { $nin: [null, ''] },
+    $or: [
+      { untouchedParkedAt: null },
+      { untouchedParkedAt: { $exists: false } },
+    ],
   }).sort({ priorityRank: -1, createdAt: 1 }).limit(500).lean();
 
   if (!leads.length) {
@@ -337,10 +345,11 @@ async function autoAssignBulkLeads(options = {}) {
     isActive: true,
     role: { $in: ['STAFF', 'TEAM_LEADER'] },
     managingClients: { $exists: true, $ne: [] },
-  }).select('name role team branch maxLeadAllocation workStart workEnd managingClients employmentStatus').lean();
+  }).select('name role team branch maxLeadAllocation workStart workEnd managingClients employmentStatus autoAssignApplicable').lean();
 
   const working = staff.filter((person) => (
-    !onLeave.has(String(person._id))
+    person.autoAssignApplicable !== false
+    && !onLeave.has(String(person._id))
     && person.employmentStatus !== 'on_leave'
     && (options.ignoreWorkHours || isWithinWorkHours(person, now, timeZone))
     && Array.isArray(person.managingClients)

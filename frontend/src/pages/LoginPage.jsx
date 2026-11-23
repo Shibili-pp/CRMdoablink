@@ -1,18 +1,7 @@
 import { useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { LayoutDashboard, LogIn, Shield, UserRound } from 'lucide-react';
-import { DEMOS } from '../constants/nav';
+import { LayoutDashboard, LogIn } from 'lucide-react';
 import { messageFrom, useApp } from '../context/AppContext';
-
-const ROLE_ICON = {
-  owner: Shield,
-  superadmin: Shield,
-  admin: UserRound,
-  teamleader: UserRound,
-  staff: UserRound,
-};
-
-const demoEnabled = !import.meta.env.PROD && import.meta.env.VITE_ENABLE_DEMO_LOGIN === 'true';
 
 export default function LoginPage() {
   const { user, login } = useApp();
@@ -79,22 +68,6 @@ export default function LoginPage() {
             <LogIn size={16} aria-hidden="true" />
             {busy ? 'Signing in…' : 'Login'}
           </button>
-          {demoEnabled && (
-            <div className="login-demo">
-              <p className="muted">Demo accounts — development only. Choosing a role fills the form. You still need to press Login.</p>
-              <div className="demo-grid">
-                {DEMOS.map((demo) => {
-                  const Icon = ROLE_ICON[demo.username] || UserRound;
-                  return (
-                    <button key={demo.username} type="button" onClick={() => setForm({ username: demo.username, password: demo.password })}>
-                      <span className="demo-role"><Icon size={16} aria-hidden="true" /><strong>{demo.role}</strong></span>
-                      <span className="muted">{demo.blurb}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </form>
       </section>
     </div>

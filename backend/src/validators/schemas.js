@@ -34,7 +34,7 @@ const query = Joi.object({
   dataSource: Joi.string().valid(...DATA_SOURCES, ''),
   matchStatus: Joi.string().max(30).allow(''),
   bucket: Joi.string().valid('assigned', 'unassigned', 'rnp', 'utc', 'today', 'upcoming', 'overdue', 'missed', 'demo', ''),
-  section: Joi.string().valid('rnp', 'utc', 'all', ''),
+  section: Joi.string().valid('rnp', 'utc', 'disqualified', 'not_interested', 'untouched', 'all', ''),
   view: Joi.string().max(30).allow(''),
   fromSheet: Joi.string().valid('true', 'false', ''),
   touch: Joi.string().valid('untouched', 'worked', ''),
@@ -105,6 +105,9 @@ const leadPatch = leadBody.fork(['name', 'phone', 'source', 'firm', 'leadRole'],
   reason: Joi.string().max(300).allow(''),
   demoDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null),
   demoTime: Joi.string().pattern(/^\d{2}:\d{2}$/).allow('', null),
+  followUpDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null),
+  followUpTime: Joi.string().pattern(/^\d{2}:\d{2}$/).allow('', null),
+  cancelReason: Joi.string().trim().min(3).max(500).allow('', null),
 });
 
 const pipelinePatch = Joi.object({
@@ -117,6 +120,9 @@ const pipelinePatch = Joi.object({
   paymentAction: Joi.string().valid('submit', 'approve', 'return'),
   demoDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null),
   demoTime: Joi.string().pattern(/^\d{2}:\d{2}$/).allow('', null),
+  followUpDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).allow('', null),
+  followUpTime: Joi.string().pattern(/^\d{2}:\d{2}$/).allow('', null),
+  cancelReason: Joi.string().trim().min(3).max(500).allow('', null),
 });
 
 module.exports = {
@@ -144,6 +150,8 @@ module.exports = {
     workStart: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
     workEnd: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
     managingClients: Joi.array().items(Joi.string().max(60)).max(20),
+    managingFirms: Joi.array().items(Joi.string().max(60)).max(20),
+    autoAssignApplicable: Joi.boolean(),
   }),
   userPatch: Joi.object({
     name: Joi.string().trim().min(2).max(120),
@@ -163,6 +171,8 @@ module.exports = {
     workStart: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
     workEnd: Joi.string().pattern(/^([01]\d|2[0-3]):[0-5]\d$/),
     managingClients: Joi.array().items(Joi.string().max(60)).max(20),
+    managingFirms: Joi.array().items(Joi.string().max(60)).max(20),
+    autoAssignApplicable: Joi.boolean(),
   }),
   permissions: Joi.object({ permissions: Joi.array().items(Joi.string()).required() }),
   branch: Joi.object({
@@ -193,7 +203,9 @@ module.exports = {
     lostReason: Joi.string().allow(''),
   }),
   bulkDelete: Joi.object({
-    leadIds: Joi.array().items(objectId).min(1).max(200).required(),
+    leadIds: Joi.array().items(objectId).min(1).max(5000).required(),
+    protect: Joi.boolean().default(false),
+    passkey: Joi.string().trim().length(6).pattern(/^\d{6}$/).allow('', null),
   }),
   swapSets: Joi.object({
     staffA: objectId.required(),
@@ -210,7 +222,13 @@ module.exports = {
   assignAllow: Joi.object({
     presentStaffIds: Joi.array().items(objectId).min(1).max(500).required(),
   }),
+  myWorkingToday: Joi.object({
+    working: Joi.boolean().required(),
+  }),
   autoAssignMaster: Joi.object({
+    enabled: Joi.boolean().required(),
+  }),
+  holdAssignedMaster: Joi.object({
     enabled: Joi.boolean().required(),
   }),
   distribute: Joi.object({
@@ -239,6 +257,7 @@ module.exports = {
     leadRole: Joi.string().max(60).required(),
     firm: Joi.string().max(60).required(),
     source: Joi.string().trim().min(2).max(80).required(),
+    assignedTo: objectId.allow(null, ''),
   }),
   leadSourceParam: Joi.object({ name: Joi.string().trim().min(2).max(80).required() }),
   leadRoleBody: Joi.object({ label: Joi.string().trim().min(2).max(80).required() }),

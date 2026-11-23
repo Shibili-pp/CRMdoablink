@@ -2,7 +2,10 @@ import { Fragment, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Phone } from 'lucide-react';
 import api from '../api/client';
-import DemoScheduleModal from '../components/DemoScheduleModal';
+import DemoCancelModal, { DEMO_CANCEL_STATUSES, DEMO_OVER_STATUSES } from '../components/DemoCancelModal';
+import DemoScheduleModal, { DEMO_GATE_STATUSES } from '../components/DemoScheduleModal';
+import FollowUpDateModal, { FOLLOWUP_GATE_STATUSES } from '../components/FollowUpDateModal';
+import LostReasonModal, { BUCKET_PARK_STATUSES } from '../components/LostReasonModal';
 import { Empty, Field, FirmBadge, LEAD_STATUS_COLORS, Modal, Page, SkeletonRows, money } from '../components/ui';
 import { messageFrom, useApp } from '../context/AppContext';
 
@@ -20,7 +23,10 @@ function PipelineRow({ row, statuses, leadRoles, leadFirms, toast, onSaved, onCl
     remarks: row.remarks || '',
     status: row.status,
   });
-  const [demoPrompt, setDemoPrompt] = useState(false);
+  const [demoPrompt, setDemoPrompt] = useState(null);
+  const [demoOutcomePrompt, setDemoOutcomePrompt] = useState(null);
+  const [followUpPrompt, setFollowUpPrompt] = useState(null);
+  const [parkPrompt, setParkPrompt] = useState(null);
 
   useEffect(() => {
     setForm({
@@ -47,12 +53,24 @@ function PipelineRow({ row, statuses, leadRoles, leadFirms, toast, onSaved, onCl
       onClaim(row);
       return;
     }
-    if (status === 'demo_booked') {
-      setDemoPrompt(true);
+    if (DEMO_GATE_STATUSES.includes(status)) {
+      setDemoPrompt({ status });
+      return;
+    }
+    if (DEMO_OVER_STATUSES.includes(status) || DEMO_CANCEL_STATUSES.includes(status)) {
+      setDemoOutcomePrompt({ status });
+      return;
+    }
+    if (FOLLOWUP_GATE_STATUSES.includes(status)) {
+      setFollowUpPrompt({ status });
+      return;
+    }
+    if (BUCKET_PARK_STATUSES.includes(status)) {
+      setParkPrompt({ status });
       return;
     }
     let lostReason = '';
-    if (['lost', 'not_interested', 'disqualified'].includes(status)) {
+    if (status === 'lost') {
       lostReason = window.prompt('Why was this lead lost?', row.lostReason || '') || '';
       if (!lostReason) return;
     }
@@ -105,13 +123,65 @@ function PipelineRow({ row, statuses, leadRoles, leadFirms, toast, onSaved, onCl
     {demoPrompt && (
       <DemoScheduleModal
         leadName={row.name}
-        onCancel={() => setDemoPrompt(false)}
+        statusLabel={statuses.find((item) => item.key === demoPrompt.status)?.label || demoPrompt.status}
+        onCancel={() => setDemoPrompt(null)}
         onConfirm={async ({ demoDate, demoTime }) => {
-          const ok = await save({ status: 'demo_booked', demoDate, demoTime });
+          const ok = await save({ status: demoPrompt.status, demoDate, demoTime });
           if (ok) {
-            setForm({ ...form, status: 'demo_booked' });
-            setDemoPrompt(false);
-            toast('Demo booked · added to Follow-ups');
+            setForm({ ...form, status: demoPrompt.status });
+            setDemoPrompt(null);
+            toast('Upcoming demo set · added to Follow-ups');
+          }
+        }}
+      />
+    )}
+    {demoOutcomePrompt && (
+      <DemoCancelModal
+        leadName={row.name}
+        mode={DEMO_CANCEL_STATUSES.includes(demoOutcomePrompt.status) ? 'cancel' : 'over'}
+        onCancel={() => setDemoOutcomePrompt(null)}
+        onConfirm={async (payload) => {
+          const ok = await save({ status: demoOutcomePrompt.status, ...payload });
+          if (ok) {
+            setForm({ ...form, status: demoOutcomePrompt.status });
+            setDemoOutcomePrompt(null);
+            toast(DEMO_CANCEL_STATUSES.includes(demoOutcomePrompt.status)
+              ? 'Demo cancelled · cancelled demos + follow-up added'
+              : 'Demo marked over · completed demos + follow-up added');
+          }
+        }}
+      />
+    )}
+    {followUpPrompt && (
+      <FollowUpDateModal
+        leadName={row.name}
+        statusLabel={statuses.find((item) => item.key === followUpPrompt.status)?.label || followUpPrompt.status}
+        onCancel={() => setFollowUpPrompt(null)}
+        onConfirm={async ({ followUpDate, followUpTime }) => {
+          const ok = await save({
+            status: followUpPrompt.status,
+            followUpDate,
+            followUpTime,
+          });
+          if (ok) {
+            setForm({ ...form, status: followUpPrompt.status });
+            setFollowUpPrompt(null);
+            toast('Status updated · follow-up added');
+          }
+        }}
+      />
+    )}
+    {parkPrompt && (
+      <LostReasonModal
+        leadName={row.name}
+        statusLabel={statuses.find((item) => item.key === parkPrompt.status)?.label || parkPrompt.status}
+        onCancel={() => setParkPrompt(null)}
+        onConfirm={async ({ lostReason }) => {
+          const ok = await save({ status: parkPrompt.status, lostReason });
+          if (ok) {
+            setParkPrompt(null);
+            toast(`Moved to bucket · ${statuses.find((item) => item.key === parkPrompt.status)?.label || parkPrompt.status}`);
+            onSaved();
           }
         }}
       />

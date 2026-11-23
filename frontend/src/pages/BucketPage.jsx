@@ -14,6 +14,9 @@ export default function BucketPage() {
   const [sheetRows, setSheetRows] = useState([]);
   const [rnpRows, setRnpRows] = useState([]);
   const [utcRows, setUtcRows] = useState([]);
+  const [disqualifiedRows, setDisqualifiedRows] = useState([]);
+  const [notInterestedRows, setNotInterestedRows] = useState([]);
+  const [untouchedRows, setUntouchedRows] = useState([]);
   const [staff, setStaff] = useState([]);
   const [selected, setSelected] = useState([]);
   const [staffId, setStaffId] = useState('');
@@ -29,6 +32,9 @@ export default function BucketPage() {
   const [sheetTotal, setSheetTotal] = useState(null);
   const [rnpTotal, setRnpTotal] = useState(null);
   const [utcTotal, setUtcTotal] = useState(null);
+  const [disqualifiedTotal, setDisqualifiedTotal] = useState(null);
+  const [notInterestedTotal, setNotInterestedTotal] = useState(null);
+  const [untouchedTotal, setUntouchedTotal] = useState(null);
   const canDelete = can('leads.delete');
   const canAssign = can('leads.assign');
 
@@ -41,24 +47,39 @@ export default function BucketPage() {
     const sheet = new URLSearchParams({ ...base, fromSheet: 'true' });
     const rnp = new URLSearchParams({ ...base, section: 'rnp' });
     const utc = new URLSearchParams({ ...base, section: 'utc' });
+    const disqualified = new URLSearchParams({ ...base, section: 'disqualified' });
+    const notInterested = new URLSearchParams({ ...base, section: 'not_interested' });
+    const untouched = new URLSearchParams({ ...base, section: 'untouched' });
     Promise.all([
       api.get(`/api/v1/leads?${regular}`),
       api.get(`/api/v1/leads?${sheet}`),
       api.get(`/api/v1/leads?${rnp}`),
       api.get(`/api/v1/leads?${utc}`),
-    ]).then(([regularRes, sheetRes, rnpRes, utcRes]) => {
+      api.get(`/api/v1/leads?${disqualified}`),
+      api.get(`/api/v1/leads?${notInterested}`),
+      api.get(`/api/v1/leads?${untouched}`),
+    ]).then(([regularRes, sheetRes, rnpRes, utcRes, disqualifiedRes, notInterestedRes, untouchedRes]) => {
       const data = regularRes.data.data || [];
       const fromSheet = sheetRes.data.data || [];
       const rnpData = rnpRes.data.data || [];
       const utcData = utcRes.data.data || [];
+      const disqualifiedData = disqualifiedRes.data.data || [];
+      const notInterestedData = notInterestedRes.data.data || [];
+      const untouchedData = untouchedRes.data.data || [];
       setRows(data);
       setSheetRows(fromSheet);
       setRnpRows(rnpData);
       setUtcRows(utcData);
+      setDisqualifiedRows(disqualifiedData);
+      setNotInterestedRows(notInterestedData);
+      setUntouchedRows(untouchedData);
       setTotal(regularRes.data.meta?.total ?? data.length);
       setSheetTotal(sheetRes.data.meta?.total ?? fromSheet.length);
       setRnpTotal(rnpRes.data.meta?.total ?? rnpData.length);
       setUtcTotal(utcRes.data.meta?.total ?? utcData.length);
+      setDisqualifiedTotal(disqualifiedRes.data.meta?.total ?? disqualifiedData.length);
+      setNotInterestedTotal(notInterestedRes.data.meta?.total ?? notInterestedData.length);
+      setUntouchedTotal(untouchedRes.data.meta?.total ?? untouchedData.length);
     }).catch((error) => toast(messageFrom(error), 'error'));
     api.get('/api/v1/lead-assignments/workload').then((response) => setStaff(response.data.data.filter((person) => person.available))).catch(() => {});
   };
@@ -84,7 +105,7 @@ export default function BucketPage() {
   };
 
   const toggle = (id) => setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  const visibleIds = [...sheetRows, ...rnpRows, ...utcRows, ...rows].map((row) => row._id);
+  const visibleIds = [...sheetRows, ...rnpRows, ...utcRows, ...rows, ...untouchedRows, ...disqualifiedRows, ...notInterestedRows].map((row) => row._id);
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.includes(id));
   const selectAll = () => {
     if (!visibleIds.length) return;
@@ -147,7 +168,7 @@ export default function BucketPage() {
     }
   };
 
-  const bucketColumns = (list) => {
+  const bucketColumns = (list, { rnpTrail = false } = {}) => {
     const ids = list.map((row) => row._id);
     const sectionSelected = ids.length > 0 && ids.every((id) => selected.includes(id));
     return [
@@ -181,6 +202,35 @@ export default function BucketPage() {
       { key: 'phoneDisplay', label: 'Phone' },
       { key: 'source', label: 'Source' },
       { key: 'priority', label: 'Priority' },
+      ...(rnpTrail ? [
+        {
+          key: 'rnpDate',
+          label: 'RNP date',
+          render: (row) => row.rnpReachedAtLabel
+            || (row.rnpMarkedAt
+              ? new Date(row.rnpMarkedAt).toLocaleString('en-IN', {
+                timeZone: 'Asia/Kolkata',
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+              : '—'),
+        },
+        {
+          key: 'rnpStaff',
+          label: 'RNP staff',
+          render: (row) => {
+            const latest = row.rnpLatestStaffName || row.rnpLastStaff?.name || '';
+            const earlier = (row.rnpPreviousStaffNames || []).join(' → ');
+            if (!latest && !earlier) {
+              return row.rnpStaffTrail && row.rnpStaffTrail !== '—' ? row.rnpStaffTrail : '—';
+            }
+            return `${latest ? `Latest RNP: ${latest}` : ''}${latest && earlier ? ' · ' : ''}${earlier ? `Earlier: ${earlier}` : ''}`;
+          },
+        },
+      ] : []),
       { key: 'district', label: 'District' },
     ];
   };
@@ -201,7 +251,7 @@ export default function BucketPage() {
   };
 
   return (
-    <Page title="Lead bucket" subtitle={`${(sheetTotal || 0) + (rnpTotal || 0) + (utcTotal || 0) + (total || 0)} unassigned · ${(sheetTotal || 0)} sheet · ${(rnpTotal || 0)} RNP · ${(utcTotal || 0)} UTC`} actions={
+    <Page title="Lead bucket" subtitle={`${(sheetTotal || 0) + (rnpTotal || 0) + (utcTotal || 0) + (total || 0) + (untouchedTotal || 0) + (disqualifiedTotal || 0) + (notInterestedTotal || 0)} in bucket · ${(sheetTotal || 0)} sheet · ${(rnpTotal || 0)} RNP · ${(utcTotal || 0)} UTC · ${(untouchedTotal || 0)} untouched · ${(disqualifiedTotal || 0)} disqualified · ${(notInterestedTotal || 0)} not interested`} actions={
       <>
         {canAssign && <button className="btn secondary" type="button" onClick={runAutoAssign}>Auto-assign daily mix</button>}
         {canAssign && <button className="btn secondary" type="button" onClick={runRnpAssign}>Auto-assign RNP only</button>}
@@ -254,7 +304,7 @@ export default function BucketPage() {
       )}
       <section className="lead-section" aria-label="New lead from sheet">
         <h2>New lead from sheet{sheetTotal == null ? '' : ` (${sheetTotal})`}</h2>
-        <p className="muted">Highest priority. Owner/Super Admin turns Auto assigning ON, then Allow assigning. Auto mix fills only remaining of 120 after today’s sheet + carry-over fresh (manual can go above 120). Fresh stays 2 days; if still fresh → UTC bucket for reassign. RNP/UTC change → next-day rotate. 15% stays for TL+ manual.</p>
+        <p className="muted">Highest priority. Owner turns Auto assigning ON. Staff who open CRM and say Yes to “working today” are present — sheet and other auto leads split only among them. Target 120 after holds + sheet. Fresh / Not Contacted: 3 working days → Untouched calls (manual). RNP/UTC next-day rotate. 15% TL+ manual.</p>
       </section>
       <DataTable
         className="lead-book"
@@ -265,18 +315,18 @@ export default function BucketPage() {
       />
       <section className="lead-section" aria-label="RNP leads" style={{ marginTop: 18 }}>
         <h2>RNP{rnpTotal == null ? '' : ` (${rnpTotal})`}</h2>
-        <p className="muted">After work end / 20:00, RNP returns here. Next work start rotates A→B→C; the new staff gets it as fresh (not RNP). Firms 50-50. Quota: 30% of remaining auto slots (120 − sheet today − carry-over fresh).</p>
+        <p className="muted">Only while Auto assigning is ON: RNP stays with staff the mark day plus the next day (retry if busy), then after work end / 20:00 it returns here. Next work start rotates A→B→C as fresh. If every staff managing that client already marked RNP, the lead moves to Disqualified. Firms 50-50. Quota: 30% of remaining auto slots.</p>
       </section>
       <DataTable
         className="lead-book"
         rows={rnpRows}
         empty="No RNP leads in the bucket"
         onRow={(row) => navigate(`/leads/${row._id}`)}
-        columns={bucketColumns(rnpRows)}
+        columns={bucketColumns(rnpRows, { rnpTrail: true })}
       />
       <section className="lead-section" aria-label="UTC leads" style={{ marginTop: 18 }}>
         <h2>UTC{utcTotal == null ? '' : ` (${utcTotal})`}</h2>
-        <p className="muted">UTC from after-work return, or fresh held 2 days with no RNP/UTC. Next work start rotates A→B→C; the new staff gets it as fresh. Firms 50-50. Quota: 15% of remaining auto slots (120 − sheet − carry-over fresh).</p>
+        <p className="muted">Only while Auto assigning is ON: UTC stays with staff the mark day plus the next day, then after work end / 20:00 it returns here. If Auto assigning is OFF, leads stay with staff. Next work start rotates A→B→C as fresh. Firms 50-50. Quota: 15% of remaining auto slots.</p>
       </section>
       <DataTable
         className="lead-book"
@@ -287,7 +337,7 @@ export default function BucketPage() {
       />
       <section className="lead-section" aria-label="Unassigned leads" style={{ marginTop: 18 }}>
         <h2>Unassigned leads{total == null ? '' : ` (${total})`}</h2>
-        <p className="muted">Bulk / manual uploads. Quota: 40% of remaining auto slots (120 − sheet − carry-over fresh). Firms 50-50. Matching managing client only. Last 15% for TL+ manual. Manual assign may exceed 120.</p>
+        <p className="muted">Bulk / manual uploads. Quota: 40% of remaining auto slots (120 − sheet − hold carry). Firms 50-50. Matching managing client only. Last 15% for TL+ manual. Manual assign may exceed 120.</p>
       </section>
       <DataTable
         className="lead-book"
@@ -295,6 +345,39 @@ export default function BucketPage() {
         empty="The bucket is empty"
         onRow={(row) => navigate(`/leads/${row._id}`)}
         columns={bucketColumns(rows)}
+      />
+      <section className="lead-section" aria-label="Untouched calls" style={{ marginTop: 18 }}>
+        <h2>Untouched calls{untouchedTotal == null ? '' : ` (${untouchedTotal})`}</h2>
+        <p className="muted">Fresh / Not Contacted / Untouched leads that stayed with staff for 3 working days (Sunday off) with no status change. They leave Lead Management and land here. Manual assign only — not included in auto-assign.</p>
+      </section>
+      <DataTable
+        className="lead-book"
+        rows={untouchedRows}
+        empty="No untouched calls in the bucket"
+        onRow={(row) => navigate(`/leads/${row._id}`)}
+        columns={bucketColumns(untouchedRows)}
+      />
+      <section className="lead-section" aria-label="Disqualified leads" style={{ marginTop: 18 }}>
+        <h2>Disqualified{disqualifiedTotal == null ? '' : ` (${disqualifiedTotal})`}</h2>
+        <p className="muted">Leads marked Disqualified leave Lead Management and land here with the reason. They are not auto-assigned.</p>
+      </section>
+      <DataTable
+        className="lead-book"
+        rows={disqualifiedRows}
+        empty="No disqualified leads"
+        onRow={(row) => navigate(`/leads/${row._id}`)}
+        columns={bucketColumns(disqualifiedRows)}
+      />
+      <section className="lead-section" aria-label="Not interested leads" style={{ marginTop: 18 }}>
+        <h2>Not Interested{notInterestedTotal == null ? '' : ` (${notInterestedTotal})`}</h2>
+        <p className="muted">Leads marked Not Interested leave Lead Management and land here with the reason. They are not auto-assigned.</p>
+      </section>
+      <DataTable
+        className="lead-book"
+        rows={notInterestedRows}
+        empty="No not-interested leads"
+        onRow={(row) => navigate(`/leads/${row._id}`)}
+        columns={bucketColumns(notInterestedRows)}
       />
       {open && (
         <Modal title="New lead" onClose={() => setOpen(false)}>

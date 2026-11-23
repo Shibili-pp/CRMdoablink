@@ -29,7 +29,7 @@ class OrbitApi(private val baseUrl: String) {
             .put("manufacturer", android.os.Build.MANUFACTURER)
             .put("model", android.os.Build.MODEL)
             .put("osVersion", android.os.Build.VERSION.RELEASE)
-            .put("appVersion", "0.3.2")
+            .put("appVersion", "0.3.4")
             .put("consentAccepted", true)
             .put("contactsConsent", contactsGranted)
             .put("callLogPermission", if (callLogGranted) "granted" else "denied")

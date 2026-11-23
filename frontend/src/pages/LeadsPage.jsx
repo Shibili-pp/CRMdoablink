@@ -36,6 +36,7 @@ export default function LeadsPage() {
   const [reassignOpen, setReassignOpen] = useState(false);
   const [reassignLead, setReassignLead] = useState(null);
   const [swapOpen, setSwapOpen] = useState(false);
+  const [holdAssigned, setHoldAssigned] = useState(false);
   const canAssign = can('leads.assign');
   const canDelete = can('leads.delete');
   const canSelect = canAssign || canDelete;
@@ -74,6 +75,11 @@ export default function LeadsPage() {
       setLeadRoles(response.data.data.leadRoles || []);
       setLeadFirms(response.data.data.leadFirms || []);
     }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    api.get('/api/v1/lead-assignments/hold-assigned')
+      .then((response) => setHoldAssigned(Boolean(response.data.data?.enabled)))
+      .catch(() => setHoldAssigned(false));
   }, []);
   useEffect(() => {
     if (!canAssign) return;
@@ -196,13 +202,20 @@ export default function LeadsPage() {
   ];
 
   return (
-    <Page title="Lead Management" subtitle="Search, filter and update the live lead book. Team Leader+ can reassign leads manually (reserved 15% of daily mix — e.g. not interested → another staff)." actions={
+    <Page title="Lead Management" subtitle={holdAssigned
+      ? 'Hold assigned is ON — set follow-up status, dates and clean previous Excel data here. Calls Today is paused until Owner turns Hold OFF.'
+      : 'Search, filter and update the live lead book. Team Leader+ can reassign leads manually (reserved 15% of daily mix — e.g. not interested → another staff).'} actions={
       <>
         {can('leads.export') && <button className="btn secondary" type="button" onClick={() => exportLeads('xlsx')}>Excel</button>}
         {can('leads.export') && <button className="btn secondary" type="button" onClick={() => exportLeads('csv')}>CSV</button>}
         {canAssign && <button className="btn secondary" type="button" onClick={() => setSwapOpen(true)}>Swap leads</button>}
       </>
     }>
+      {holdAssigned && (
+        <div className="banner" style={{ marginBottom: 14 }}>
+          Setup mode: assigned leads stay here for status / follow-up date cleanup. Reassign is not blocked by capacity. Dial list stays empty until Hold is turned OFF.
+        </div>
+      )}
       <div className="filters lead-filters">
         <label className="field lead-search"><span>Search</span>
           <input placeholder="Name, phone or lead ID" aria-label="Search leads" value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value, page: 1 })} />
@@ -288,7 +301,7 @@ export default function LeadsPage() {
       )}
       <section className="lead-section" aria-label="Untouched leads">
         <h2>Untouched leads{untouchedMeta?.total ? ` (${untouchedMeta.total})` : ''}</h2>
-        <p className="muted">Assigned leads whose staff member has not changed the status. High priority call leads show first. A lead still untouched after 24 hours is shown in red.</p>
+        <p className="muted">Fresh / Not Contacted / Untouched — same hold. Staff keep them for 3 working days (Sunday off). If still no status change, they move to Untouched calls in the bucket (manual only). High priority first; after 24 hours shown in red.</p>
         <DataTable
           className="lead-book"
           loading={loading}

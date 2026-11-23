@@ -42,6 +42,8 @@ function publicUser(user) {
     workStart: user.workStart || '',
     workEnd: user.workEnd || '',
     managingClients: Array.isArray(user.managingClients) ? user.managingClients : [],
+    managingFirms: Array.isArray(user.managingFirms) ? user.managingFirms : [],
+    autoAssignApplicable: user.autoAssignApplicable !== false,
   };
 }
 

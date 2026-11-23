@@ -121,6 +121,15 @@ router.get('/leads/export', requirePermission('leads.export'), q, action(async (
 }));
 router.get('/leads', requirePermission('leads.view'), q, action((req) => leads.list(req.user, req.query)));
 router.get('/leads-all/facets', requireRoles('OWNER', 'SUPER_ADMIN'), q, action((req) => leads.allLeadFacets(req.user, req.query)));
+router.get('/leads-all/ids', requireRoles('OWNER', 'SUPER_ADMIN'), q, action((req) => leads.allLeadIds(req.user, req.query)));
+router.get('/lead-delete-passkey', requireRoles('OWNER', 'SUPER_ADMIN'), action((req) => {
+  const deletePasskey = require('../services/deletePasskey');
+  return deletePasskey.getStatus(req.user);
+}));
+router.post('/lead-delete-passkey', requireRoles('OWNER'), action((req) => {
+  const deletePasskey = require('../services/deletePasskey');
+  return deletePasskey.createPasskey(req.user);
+}));
 router.post('/leads', requirePermission('leads.create'), validate({ body: schemas.lead }), action((req, meta) => leads.create(req.user, req.body, meta)));
 router.post('/leads/bulk/status', requirePermission('leads.edit'), validate({ body: schemas.bulkStatus }), action((req, meta) => leads.bulkStatus(req.user, req.body, meta)));
 router.post('/leads/bulk/delete', requirePermission('leads.delete'), validate({ body: schemas.bulkDelete }), action((req, meta) => leads.bulkRemove(req.user, req.body, meta)));
@@ -265,9 +274,25 @@ router.put('/lead-assignments/auto-assign-master', requireRoles('OWNER', 'SUPER_
   const assignAllow = require('../services/assignAllow');
   return assignAllow.setAutoAssignMaster(req.user, req.body.enabled);
 }));
+router.get('/lead-assignments/hold-assigned', requireAuth, action(async () => {
+  const assignAllow = require('../services/assignAllow');
+  return { data: await assignAllow.getHoldAssignedMaster() };
+}));
+router.put('/lead-assignments/hold-assigned', requireRoles('OWNER'), validate({ body: schemas.holdAssignedMaster }), action((req) => {
+  const assignAllow = require('../services/assignAllow');
+  return assignAllow.setHoldAssignedMaster(req.user, req.body.enabled);
+}));
 router.post('/lead-assignments/allow', requireRoles('OWNER', 'SUPER_ADMIN'), validate({ body: schemas.assignAllow }), action((req) => {
   const assignAllow = require('../services/assignAllow');
   return assignAllow.allowAndAssign(req.user, req.body);
+}));
+router.get('/lead-assignments/my-working-today', requireRoles('STAFF', 'TEAM_LEADER'), action((req) => {
+  const assignAllow = require('../services/assignAllow');
+  return assignAllow.getMyWorkingToday(req.user);
+}));
+router.post('/lead-assignments/my-working-today', requireRoles('STAFF', 'TEAM_LEADER'), validate({ body: schemas.myWorkingToday }), action((req) => {
+  const assignAllow = require('../services/assignAllow');
+  return assignAllow.setMyWorkingToday(req.user, req.body);
 }));
 router.post('/lead-assignments/auto-assign', requirePermission('leads.assign'), action(async () => {
   const assignAllow = require('../services/assignAllow');

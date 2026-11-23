@@ -20,12 +20,15 @@ const emptyForm = {
   workStart: '11:00',
   workEnd: '20:00',
   managingClients: [],
+  managingFirms: [],
+  autoAssignApplicable: true,
 };
 
 export default function UsersPage() {
   const { user, toast, confirm } = useApp();
   const [rows, setRows] = useState([]);
   const [clients, setClients] = useState([]);
+  const [firms, setFirms] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(emptyForm);
@@ -45,7 +48,10 @@ export default function UsersPage() {
 
   useEffect(() => {
     load();
-    api.get('/api/v1/meta').then((response) => setClients(response.data.data.leadRoles || [])).catch(() => {});
+    api.get('/api/v1/meta').then((response) => {
+      setClients(response.data.data.leadRoles || []);
+      setFirms(response.data.data.leadFirms || []);
+    }).catch(() => {});
   }, []);
 
   const canSetLogin = (row) => user && RANK[user.role] > RANK[row.role];
@@ -62,9 +68,26 @@ export default function UsersPage() {
     });
   };
 
+  const toggleFirm = (key) => {
+    setForm((current) => {
+      const selected = current.managingFirms || [];
+      return {
+        ...current,
+        managingFirms: selected.includes(key)
+          ? selected.filter((item) => item !== key)
+          : [...selected, key],
+      };
+    });
+  };
+
   const clientLabels = (keys = []) => {
     if (!keys.length) return '—';
     return keys.map((key) => clients.find((item) => item.key === key)?.label || key).join(', ');
+  };
+
+  const firmLabels = (keys = []) => {
+    if (!keys.length) return '—';
+    return keys.map((key) => firms.find((item) => item.key === key)?.label || key).join(', ');
   };
 
   const create = async (event) => {
@@ -77,6 +100,8 @@ export default function UsersPage() {
         workStart: form.workStart,
         workEnd: form.workEnd,
         managingClients: form.managingClients || [],
+        managingFirms: form.managingFirms || [],
+        autoAssignApplicable: form.autoAssignApplicable !== false,
       });
       toast('User created. They can sign in with this user ID and password.');
       setOpen(false);
@@ -93,11 +118,21 @@ export default function UsersPage() {
         workStart: form.workStart,
         workEnd: form.workEnd,
         managingClients: form.managingClients || [],
+        managingFirms: form.managingFirms || [],
+        autoAssignApplicable: form.autoAssignApplicable !== false,
       };
       if (form.password) body.password = form.password;
       await api.patch(`/api/v1/users/${editing.id || editing._id}`, body);
       toast('Login updated');
       setEditing(null);
+      load();
+    } catch (error) { toast(messageFrom(error), 'error'); }
+  };
+
+  const setAutoAssignApplicable = async (row, enabled) => {
+    try {
+      await api.patch(`/api/v1/users/${row.id || row._id}`, { autoAssignApplicable: enabled });
+      toast(enabled ? 'Auto assigning applicable ON' : 'Auto assigning applicable OFF');
       load();
     } catch (error) { toast(messageFrom(error), 'error'); }
   };
@@ -130,6 +165,24 @@ export default function UsersPage() {
     </Field>
   );
 
+  const firmPicker = (
+    <Field label="Managing firms (optional)" full>
+      <div className="client-pick" role="group" aria-label="Managing firms">
+        {firms.length ? firms.map((firm) => (
+          <label key={firm.key} className="check-row">
+            <input
+              type="checkbox"
+              checked={(form.managingFirms || []).includes(firm.key)}
+              onChange={() => toggleFirm(firm.key)}
+            />
+            <span>{firm.label}</span>
+          </label>
+        )) : <span className="muted">No firms in Preset yet</span>}
+      </div>
+      <p className="muted" style={{ marginTop: 6 }}>Optional. Select none, one, or multiple firms (for example Doablink and Studlink).</p>
+    </Field>
+  );
+
   return (
     <Page
       title="User Management"
@@ -143,7 +196,26 @@ export default function UsersPage() {
           { key: 'username', label: 'User ID' },
           { key: 'role', label: 'Role', render: (row) => ROLE_LABEL[row.role] || row.role },
           { key: 'clients', label: 'Managing clients', render: (row) => clientLabels(row.managingClients) },
+          { key: 'firms', label: 'Managing firms', render: (row) => firmLabels(row.managingFirms) },
           { key: 'hours', label: 'Working time', render: (row) => row.workStart && row.workEnd ? `${row.workStart}–${row.workEnd}` : '—' },
+          {
+            key: 'autoAssign',
+            label: 'Auto assigning',
+            render: (row) => {
+              if (!['STAFF', 'TEAM_LEADER'].includes(row.role)) return '—';
+              const on = row.autoAssignApplicable !== false;
+              return (
+                <button
+                  className="btn secondary"
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => setAutoAssignApplicable(row, !on)}
+                >
+                  {on ? <Badge tone="success">Applicable ON</Badge> : <Badge tone="danger">Applicable OFF</Badge>}
+                </button>
+              );
+            },
+          },
           { key: 'status', label: 'Status', render: (row) => <Badge tone={row.isActive ? 'success' : 'danger'}>{row.isActive ? 'Active' : 'Inactive'}</Badge> },
           { key: 'action', label: '', render: (row) => canSetLogin(row) ? (
             <div className="actions">
@@ -159,6 +231,8 @@ export default function UsersPage() {
                     workStart: row.workStart || '11:00',
                     workEnd: row.workEnd || '20:00',
                     managingClients: row.managingClients || [],
+                    managingFirms: row.managingFirms || [],
+                    autoAssignApplicable: row.autoAssignApplicable !== false,
                   });
                 }}
               >
@@ -180,8 +254,21 @@ export default function UsersPage() {
             <Field label="User ID"><input aria-label="User ID" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} autoComplete="off" required /></Field>
             <Field label="Password" full><input aria-label="Password" type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete="new-password" minLength={7} required /></Field>
             {clientPicker}
+            {firmPicker}
             <Field label="Work starts"><input aria-label="Work starts" type="time" step="60" value={form.workStart} onChange={(event) => setForm({ ...form, workStart: event.target.value })} required /></Field>
             <Field label="Work ends"><input aria-label="Work ends" type="time" step="60" value={form.workEnd} onChange={(event) => setForm({ ...form, workEnd: event.target.value })} required /></Field>
+            {['STAFF', 'TEAM_LEADER'].includes(form.role) && (
+              <Field label="Auto assigning applicable" full>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={form.autoAssignApplicable !== false}
+                    onChange={(event) => setForm({ ...form, autoAssignApplicable: event.target.checked })}
+                  />
+                  <span>ON — include in sheet / RNP / UTC / bulk auto-assign (default)</span>
+                </label>
+              </Field>
+            )}
             <p className="full muted">This user ID and password are what they type on the sign-in screen.</p>
             <div className="full"><button className="btn" type="submit">Create user</button></div>
           </form>
@@ -193,8 +280,21 @@ export default function UsersPage() {
             <Field label="User ID"><input aria-label="User ID" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} required /></Field>
             <Field label="New password" full><input aria-label="New password" type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder="Leave blank to keep the current password" minLength={form.password ? 7 : undefined} /></Field>
             {clientPicker}
+            {firmPicker}
             <Field label="Work starts"><input aria-label="Work starts" type="time" step="60" value={form.workStart} onChange={(event) => setForm({ ...form, workStart: event.target.value })} required /></Field>
             <Field label="Work ends"><input aria-label="Work ends" type="time" step="60" value={form.workEnd} onChange={(event) => setForm({ ...form, workEnd: event.target.value })} required /></Field>
+            {['STAFF', 'TEAM_LEADER'].includes(editing.role) && (
+              <Field label="Auto assigning applicable" full>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={form.autoAssignApplicable !== false}
+                    onChange={(event) => setForm({ ...form, autoAssignApplicable: event.target.checked })}
+                  />
+                  <span>ON — include in auto-assign. OFF — no auto leads for this staff (manual assign still OK).</span>
+                </label>
+              </Field>
+            )}
             <div className="full"><button className="btn" type="submit">Save login</button></div>
           </form>
         </Modal>

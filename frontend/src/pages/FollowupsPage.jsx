@@ -8,6 +8,8 @@ import { messageFrom, useApp } from '../context/AppContext';
 const buckets = [
   ['today', 'Today'],
   ['demo', 'Upcoming demos'],
+  ['demo_completed', 'Completed demos'],
+  ['demo_cancelled', 'Cancelled demos'],
   ['upcoming', 'Upcoming'],
   ['overdue', 'Overdue'],
   ['missed', 'Missed'],
@@ -123,8 +125,9 @@ export default function FollowupsPage() {
           <span>{row.title}{row.isDemo ? <Badge tone="info"> Demo</Badge> : null}</span>
         ) },
         ...(canFilterStaff ? [{ key: 'assigned', label: 'Staff', hideOnMobile: true, render: (row) => row.assignedTo?.name || '—' }] : []),
-        { key: 'due', label: bucket === 'demo' ? 'Demo time' : 'Due', render: (row) => dueLabel(row.dueAt) },
-        { key: 'status', label: 'Status', render: (row) => <Badge tone={row.overdue || row.status === 'missed' ? 'danger' : row.status === 'completed' ? 'success' : 'info'}>{row.isDemo && row.status === 'pending' ? 'demo' : row.status}</Badge> },
+        { key: 'due', label: bucket === 'demo' ? 'Demo time' : (bucket === 'demo_completed' || bucket === 'demo_cancelled' ? 'Closed' : 'Due'), render: (row) => dueLabel(row.completedAt || row.dueAt) },
+        { key: 'note', label: 'Note', hideOnMobile: true, render: (row) => row.completionNotes || row.description || '—' },
+        { key: 'status', label: 'Status', render: (row) => <Badge tone={row.overdue || row.status === 'missed' || row.status === 'cancelled' ? 'danger' : row.status === 'completed' ? 'success' : 'info'}>{row.isDemo && row.status === 'pending' ? 'demo' : row.status}</Badge> },
         { key: 'call', label: 'Call', cellClass: 'lead-call', render: (row) => row.phoneNormalized ? (
           <a className="btn call-btn" href={`tel:+${row.phoneNormalized}`} aria-label={`Call ${row.leadName}`} onClick={(event) => event.stopPropagation()}><Phone size={16} /> Call</a>
         ) : '—' },

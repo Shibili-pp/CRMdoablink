@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { MessageCircle, Phone } from 'lucide-react';
 import api from '../api/client';
-import DemoScheduleModal from '../components/DemoScheduleModal';
+import DemoCancelModal, { DEMO_CANCEL_STATUSES, DEMO_OVER_STATUSES } from '../components/DemoCancelModal';
+import DemoScheduleModal, { DEMO_GATE_STATUSES } from '../components/DemoScheduleModal';
+import FollowUpDateModal, { FOLLOWUP_GATE_STATUSES } from '../components/FollowUpDateModal';
+import LostReasonModal, { BUCKET_PARK_STATUSES } from '../components/LostReasonModal';
 import { Field, FirmBadge, PriorityBadge, Page, SkeletonRows, StatusBadge, LEAD_STATUS_COLORS, day, duration, money } from '../components/ui';
 import { messageFrom, useApp } from '../context/AppContext';
 
@@ -28,6 +31,9 @@ export default function LeadDetailPage() {
   const [expectedCash, setExpectedCash] = useState('');
   const [savingCash, setSavingCash] = useState(false);
   const [demoPrompt, setDemoPrompt] = useState(null);
+  const [demoOutcomePrompt, setDemoOutcomePrompt] = useState(null);
+  const [followUpPrompt, setFollowUpPrompt] = useState(null);
+  const [parkPrompt, setParkPrompt] = useState(null);
 
   const load = () => {
     Promise.all([
@@ -55,11 +61,12 @@ export default function LeadDetailPage() {
 
   const applyStatus = async (status, extra = {}) => {
     let lostReason = extra.lostReason ?? lead.lostReason ?? '';
-    if (['lost', 'not_interested', 'disqualified'].includes(status) && !lostReason) {
+    if (status === 'lost' && !lostReason) {
       lostReason = window.prompt('Why was this lead lost?', lead.lostReason || '') || '';
       if (!lostReason) return false;
     }
-    const add = !lead.inPipeline && await confirm({
+    const skipPipelineAsk = BUCKET_PARK_STATUSES.includes(status);
+    const add = !skipPipelineAsk && !lead.inPipeline && await confirm({
       title: 'Add to pipeline?',
       message: 'Add this lead to the pipeline?',
       confirmLabel: 'Yes',
@@ -68,9 +75,21 @@ export default function LeadDetailPage() {
     try {
       await api.patch(`/api/v1/leads/${id}`, { status, lostReason, ...extra });
       if (add) await api.post(`/api/v1/leads/${id}/pipeline`);
-      toast(status === 'demo_booked'
-        ? 'Demo booked · added to Follow-ups'
-        : (add ? 'Status updated and added to pipeline' : 'Status updated'));
+      toast(BUCKET_PARK_STATUSES.includes(status)
+        ? `Moved to bucket · ${statuses.find((item) => item.key === status)?.label || status}`
+        : DEMO_GATE_STATUSES.includes(status)
+          ? 'Upcoming demo set · added to Follow-ups'
+          : DEMO_OVER_STATUSES.includes(status)
+            ? 'Demo marked over · completed demos + follow-up added'
+            : DEMO_CANCEL_STATUSES.includes(status)
+              ? 'Demo cancelled · cancelled demos + follow-up added'
+              : FOLLOWUP_GATE_STATUSES.includes(status)
+                ? 'Status updated · follow-up added'
+                : (add ? 'Status updated and added to pipeline' : 'Status updated'));
+      if (BUCKET_PARK_STATUSES.includes(status)) {
+        navigate('/bucket');
+        return true;
+      }
       load();
       return true;
     } catch (error) {
@@ -81,8 +100,20 @@ export default function LeadDetailPage() {
 
   const changeStatus = async (status) => {
     if (status === lead.status) return;
-    if (status === 'demo_booked') {
+    if (DEMO_GATE_STATUSES.includes(status)) {
       setDemoPrompt({ status });
+      return;
+    }
+    if (DEMO_OVER_STATUSES.includes(status) || DEMO_CANCEL_STATUSES.includes(status)) {
+      setDemoOutcomePrompt({ status });
+      return;
+    }
+    if (FOLLOWUP_GATE_STATUSES.includes(status)) {
+      setFollowUpPrompt({ status });
+      return;
+    }
+    if (BUCKET_PARK_STATUSES.includes(status)) {
+      setParkPrompt({ status });
       return;
     }
     await applyStatus(status);
@@ -419,10 +450,44 @@ export default function LeadDetailPage() {
       {demoPrompt && (
         <DemoScheduleModal
           leadName={lead.name}
+          statusLabel={statuses.find((item) => item.key === demoPrompt.status)?.label || demoPrompt.status}
           onCancel={() => setDemoPrompt(null)}
           onConfirm={async ({ demoDate, demoTime }) => {
-            const ok = await applyStatus('demo_booked', { demoDate, demoTime });
+            const ok = await applyStatus(demoPrompt.status, { demoDate, demoTime });
             if (ok) setDemoPrompt(null);
+          }}
+        />
+      )}
+      {demoOutcomePrompt && (
+        <DemoCancelModal
+          leadName={lead.name}
+          mode={DEMO_CANCEL_STATUSES.includes(demoOutcomePrompt.status) ? 'cancel' : 'over'}
+          onCancel={() => setDemoOutcomePrompt(null)}
+          onConfirm={async (payload) => {
+            const ok = await applyStatus(demoOutcomePrompt.status, payload);
+            if (ok) setDemoOutcomePrompt(null);
+          }}
+        />
+      )}
+      {followUpPrompt && (
+        <FollowUpDateModal
+          leadName={lead.name}
+          statusLabel={statuses.find((item) => item.key === followUpPrompt.status)?.label || followUpPrompt.status}
+          onCancel={() => setFollowUpPrompt(null)}
+          onConfirm={async ({ followUpDate, followUpTime }) => {
+            const ok = await applyStatus(followUpPrompt.status, { followUpDate, followUpTime });
+            if (ok) setFollowUpPrompt(null);
+          }}
+        />
+      )}
+      {parkPrompt && (
+        <LostReasonModal
+          leadName={lead.name}
+          statusLabel={statuses.find((item) => item.key === parkPrompt.status)?.label || parkPrompt.status}
+          onCancel={() => setParkPrompt(null)}
+          onConfirm={async ({ lostReason }) => {
+            const ok = await applyStatus(parkPrompt.status, { lostReason });
+            if (ok) setParkPrompt(null);
           }}
         />
       )}

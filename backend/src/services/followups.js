@@ -51,6 +51,12 @@ async function list(user, query) {
     filter.status = 'pending';
     filter.isDemo = true;
     filter.dueAt = { $gte: now };
+  } else if (query.bucket === 'demo_completed') {
+    filter.isDemo = true;
+    filter.status = 'completed';
+  } else if (query.bucket === 'demo_cancelled') {
+    filter.isDemo = true;
+    filter.status = 'cancelled';
   } else if (query.bucket === 'overdue') {
     filter.status = { $in: ['pending', 'missed'] };
     filter.dueAt = { $lt: now };
@@ -63,8 +69,15 @@ async function list(user, query) {
     const end = new Date(start.getTime() + 86400000);
     filter.dueAt = { $gte: start, $lt: end };
   }
-  const sort = sortFrom(query, ['dueAt', 'priority', 'createdAt'], 'dueAt');
-  if (!query.order) sort.dueAt = 1;
+  const sort = sortFrom(query, ['dueAt', 'priority', 'createdAt', 'completedAt'], 'dueAt');
+  if (!query.order) {
+    if (query.bucket === 'demo_completed' || query.bucket === 'demo_cancelled') {
+      sort.completedAt = -1;
+      delete sort.dueAt;
+    } else {
+      sort.dueAt = 1;
+    }
+  }
   const [rows, total] = await Promise.all([
     FollowUp.find(filter).sort(sort).skip(skip).limit(limit)
       .populate('lead', 'leadCode name status phoneNormalized leadRole firm')

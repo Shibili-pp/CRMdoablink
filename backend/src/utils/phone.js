@@ -1,6 +1,20 @@
+function coercePhoneText(input) {
+  if (input == null) return '';
+  if (typeof input === 'number' && Number.isFinite(input)) {
+    return String(Math.trunc(input));
+  }
+  let text = String(input).trim();
+  // Excel often stores long phones as 9.95559E+11
+  if (/^\d+(\.\d+)?e[+\-]?\d+$/i.test(text)) {
+    const value = Number(text);
+    if (Number.isFinite(value)) text = String(Math.round(value));
+  }
+  return text;
+}
+
 function normalizePhone(input, countryCode = '91') {
   if (input == null) return '';
-  let digits = String(input).replace(/\D/g, '');
+  let digits = coercePhoneText(input).replace(/\D/g, '');
   if (!digits) return '';
   if (digits.startsWith('00')) digits = digits.slice(2);
   const code = String(countryCode || '91').replace(/\D/g, '') || '91';
@@ -22,4 +36,4 @@ function formatPhone(normalized) {
   return `+${normalized}`;
 }
 
-module.exports = { normalizePhone, isValidPhone, formatPhone };
+module.exports = { coercePhoneText, normalizePhone, isValidPhone, formatPhone };

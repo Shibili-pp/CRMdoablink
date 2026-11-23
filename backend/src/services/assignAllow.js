@@ -9,6 +9,7 @@ const autoAssign = require('./autoAssign');
 
 const SETTING_KEY = 'dailyAssignAllow';
 const MASTER_KEY = 'autoAssignEnabled';
+const HOLD_KEY = 'holdAssignedLeads';
 const SYSTEM_ACTOR = { id: 'system', name: 'System', role: 'SYSTEM' };
 
 async function getAllowDoc() {
@@ -155,6 +156,49 @@ async function setAutoAssignMaster(user, enabled) {
   };
 }
 
+/**
+ * Owner onboarding hold: assigned leads stay in Lead Management.
+ * Calls Today stays empty; aging/bucket movers pause; reassign ignores capacity.
+ */
+async function isHoldAssignedOn() {
+  const doc = await SystemSetting.findOne({ key: HOLD_KEY }).lean();
+  return Boolean(doc?.value?.enabled);
+}
+
+async function getHoldAssignedMaster() {
+  const doc = await SystemSetting.findOne({ key: HOLD_KEY }).lean();
+  const value = doc?.value || {};
+  return {
+    enabled: Boolean(value.enabled),
+    updatedAt: value.updatedAt || null,
+    updatedBy: value.updatedBy || null,
+  };
+}
+
+async function setHoldAssignedMaster(user, enabled) {
+  if (user.role !== 'OWNER') {
+    throw new AppError('Only Owner can change Hold assigned leads', 403);
+  }
+  const now = new Date();
+  const wantOn = Boolean(enabled);
+  const value = {
+    enabled: wantOn,
+    updatedAt: now.toISOString(),
+    updatedBy: { id: String(user._id), name: user.name, role: user.role },
+  };
+  await SystemSetting.updateOne(
+    { key: HOLD_KEY },
+    { key: HOLD_KEY, value, updatedBy: user._id },
+    { upsert: true },
+  );
+  return {
+    data: { enabled: wantOn, updatedAt: value.updatedAt, updatedBy: value.updatedBy },
+    message: wantOn
+      ? 'Hold assigned leads is ON. Leads stay in Lead Management for setup (follow-ups, status, dates). Calls Today is paused. Aging to bucket is paused. Reassign is not blocked by capacity.'
+      : 'Hold assigned leads is OFF. Calls Today and normal hold/bucket rules run again as planned.',
+  };
+}
+
 async function getTodayAllow(timeZone) {
   const general = timeZone ? { timezone: timeZone } : await getGeneral();
   const tz = general.timezone || 'Asia/Kolkata';
@@ -168,6 +212,7 @@ async function getTodayAllow(timeZone) {
       timezone: tz,
       presentStaffIds: [],
       absentStaffIds: [],
+      responses: {},
       morningRunAt: null,
       allowedAt: null,
       allowedBy: null,
@@ -179,6 +224,7 @@ async function getTodayAllow(timeZone) {
     timezone: tz,
     presentStaffIds: (value.presentStaffIds || []).map(String),
     absentStaffIds: (value.absentStaffIds || []).map(String),
+    responses: value.responses && typeof value.responses === 'object' ? value.responses : {},
     morningRunAt: value.morningRunAt || null,
     allowedAt: value.allowedAt || null,
     allowedBy: value.allowedBy || null,
@@ -198,11 +244,12 @@ async function listAssignableStaff(now, onLeave) {
     isActive: true,
     role: { $in: ['STAFF', 'TEAM_LEADER'] },
     managingClients: { $exists: true, $ne: [] },
-  }).select('name role team branch employeeId workStart workEnd managingClients employmentStatus maxLeadAllocation').lean();
+  }).select('name role team branch employeeId workStart workEnd managingClients employmentStatus maxLeadAllocation autoAssignApplicable').lean();
 
   return staff
     .map((person) => {
       const leave = onLeave.has(String(person._id)) || person.employmentStatus === 'on_leave';
+      const autoAssignApplicable = person.autoAssignApplicable !== false;
       return {
         id: String(person._id),
         name: person.name,
@@ -212,7 +259,8 @@ async function listAssignableStaff(now, onLeave) {
         workEnd: person.workEnd || '20:00',
         managingClients: person.managingClients || [],
         onLeave: leave,
-        presentDefault: !leave && person.employmentStatus === 'active',
+        autoAssignApplicable,
+        presentDefault: !leave && person.employmentStatus === 'active' && autoAssignApplicable,
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -233,7 +281,19 @@ async function bucketCounts() {
       { $group: { _id: '$leadRole', count: { $sum: 1 } } },
     ]),
     Lead.aggregate([
-      { $match: { deletedAt: null, assignedTo: null, fromSheet: { $ne: true }, status: { $nin: ['rnp', 'utc'] }, leadRole: { $nin: [null, ''] } } },
+      {
+        $match: {
+          deletedAt: null,
+          assignedTo: null,
+          fromSheet: { $ne: true },
+          status: { $nin: ['rnp', 'utc', 'disqualified', 'not_interested'] },
+          leadRole: { $nin: [null, ''] },
+          $or: [
+            { untouchedParkedAt: null },
+            { untouchedParkedAt: { $exists: false } },
+          ],
+        },
+      },
       { $group: { _id: '$leadRole', count: { $sum: 1 } } },
     ]),
   ]);
@@ -351,9 +411,14 @@ async function preview(user) {
   const utcPlan = planCategory(buckets.utc, presentForPlan, DAILY_ASSIGN_SHARES.utc, capacity.remaining, new Map(), dailyTarget);
   const bulkPlan = planCategory(buckets.bulk, presentForPlan, DAILY_ASSIGN_SHARES.bulkUnassigned, capacity.remaining, new Map(), dailyTarget);
 
+  const responses = allow.responses || {};
   const rows = staff.map((person) => ({
     ...person,
     present: allow.allowed ? allow.presentStaffIds.includes(person.id) : person.presentDefault,
+    selfCheck: responses[person.id]?.working == null
+      ? null
+      : Boolean(responses[person.id].working),
+    selfCheckedAt: responses[person.id]?.at || null,
     plan: {
       sheet: sheetPlan.get(person.id) || 0,
       rnp: rnpPlan.get(person.id) || 0,
@@ -407,6 +472,23 @@ async function allowAndAssign(user, body = {}) {
   }
 
   const absentStaffIds = staff.map((person) => person.id).filter((id) => !presentStaffIds.includes(id));
+  const previous = await loadAllowValue(timeZone);
+  const responses = { ...previous.responses };
+  presentStaffIds.forEach((id) => {
+    responses[id] = {
+      ...(responses[id] || {}),
+      working: true,
+      at: now.toISOString(),
+      name: responses[id]?.name || '',
+      role: responses[id]?.role || '',
+      source: 'owner_allow',
+    };
+  });
+  absentStaffIds.forEach((id) => {
+    if (responses[id]?.working === true) {
+      responses[id] = { ...responses[id], working: false, at: now.toISOString(), source: 'owner_allow' };
+    }
+  });
   const value = {
     dateKey: today,
     allowed: true,
@@ -414,6 +496,7 @@ async function allowAndAssign(user, body = {}) {
     allowedBy: { id: String(user._id), name: user.name, role: user.role },
     presentStaffIds,
     absentStaffIds,
+    responses,
     morningRunAt: null,
   };
 
@@ -447,13 +530,193 @@ async function status() {
   return { data: { ...allow, master } };
 }
 
+async function loadAllowValue(timeZone) {
+  const today = dateKeyFromDate(new Date(), timeZone);
+  const doc = await getAllowDoc();
+  const value = doc?.value || null;
+  if (value && value.dateKey === today) {
+    return {
+      dateKey: today,
+      allowed: Boolean(value.allowed),
+      allowedAt: value.allowedAt || null,
+      allowedBy: value.allowedBy || null,
+      presentStaffIds: (value.presentStaffIds || []).map(String),
+      absentStaffIds: (value.absentStaffIds || []).map(String),
+      responses: value.responses && typeof value.responses === 'object' ? { ...value.responses } : {},
+      morningRunAt: value.morningRunAt || null,
+    };
+  }
+  return {
+    dateKey: today,
+    allowed: false,
+    allowedAt: null,
+    allowedBy: null,
+    presentStaffIds: [],
+    absentStaffIds: [],
+    responses: {},
+    morningRunAt: null,
+  };
+}
+
+/**
+ * Staff / TL morning check-in: “Are you working today?”
+ * Yes → present for auto-assign (sheet + mix split among present only).
+ * No → absent — no auto leads that day.
+ */
+async function getMyWorkingToday(user) {
+  if (!['STAFF', 'TEAM_LEADER'].includes(user.role)) {
+    return {
+      data: {
+        applicable: false,
+        needsAnswer: false,
+        working: null,
+        dateKey: null,
+      },
+    };
+  }
+  const general = await getGeneral();
+  const timeZone = general.timezone || 'Asia/Kolkata';
+  const now = new Date();
+  const weekday = weekdayIndex(now, timeZone);
+  const today = dateKeyFromDate(now, timeZone);
+  const onLeave = await staffOnLeave(now);
+  const leave = onLeave.has(String(user._id)) || user.employmentStatus === 'on_leave';
+  const person = await User.findOne({ _id: user._id, deletedAt: null })
+    .select('workStart workEnd employmentStatus managingClients')
+    .lean();
+  const workStart = person?.workStart || '11:00';
+  const autoOn = await isAutoAssignOn();
+  const value = await loadAllowValue(timeZone);
+  const sid = String(user._id);
+  const response = value.responses[sid];
+  const answered = response && typeof response.working === 'boolean';
+  const working = answered ? Boolean(response.working) : null;
+
+  // Sunday / leave: no prompt. Other days: ask once until answered.
+  const needsAnswer = weekday !== 0 && !leave && !answered;
+
+  return {
+    data: {
+      applicable: true,
+      needsAnswer,
+      working,
+      answered,
+      dateKey: today,
+      timezone: timeZone,
+      workStart,
+      workEnd: person?.workEnd || '20:00',
+      onLeave: leave,
+      autoAssignOn: autoOn,
+      canReceiveLeads: Boolean(autoOn && working === true),
+      presentCount: value.presentStaffIds.length,
+    },
+  };
+}
+
+async function setMyWorkingToday(user, body = {}) {
+  if (!['STAFF', 'TEAM_LEADER'].includes(user.role)) {
+    throw new AppError('Only Staff or Team Leader can answer working today', 403);
+  }
+  const working = Boolean(body.working);
+  const general = await getGeneral();
+  const timeZone = general.timezone || 'Asia/Kolkata';
+  const now = new Date();
+  const weekday = weekdayIndex(now, timeZone);
+  if (weekday === 0) {
+    throw new AppError('Sunday is not a working day for auto-assign', 422);
+  }
+  const onLeave = await staffOnLeave(now);
+  if (onLeave.has(String(user._id)) || user.employmentStatus === 'on_leave') {
+    throw new AppError('You are on leave today', 422);
+  }
+
+  const sid = String(user._id);
+  const value = await loadAllowValue(timeZone);
+  const present = new Set(value.presentStaffIds);
+  const absent = new Set(value.absentStaffIds);
+  const responses = { ...value.responses };
+
+  responses[sid] = {
+    working,
+    at: now.toISOString(),
+    name: user.name || '',
+    role: user.role,
+  };
+
+  if (working) {
+    present.add(sid);
+    absent.delete(sid);
+  } else {
+    present.delete(sid);
+    absent.add(sid);
+  }
+
+  const presentStaffIds = [...present];
+  const absentStaffIds = [...absent];
+  const next = {
+    dateKey: value.dateKey,
+    allowed: working ? true : (value.allowed || presentStaffIds.length > 0),
+    allowedAt: value.allowedAt || (working ? now.toISOString() : null),
+    allowedBy: value.allowedBy || (working
+      ? { id: sid, name: user.name, role: user.role, source: 'staff_checkin' }
+      : null),
+    presentStaffIds,
+    absentStaffIds,
+    responses,
+    morningRunAt: value.morningRunAt || null,
+  };
+
+  // Keep day allowed if anyone is present.
+  if (presentStaffIds.length) next.allowed = true;
+
+  await SystemSetting.updateOne(
+    { key: SETTING_KEY },
+    { key: SETTING_KEY, value: next, updatedBy: user._id },
+    { upsert: true },
+  );
+
+  let result = null;
+  const autoOn = await isAutoAssignOn();
+  if (working && autoOn && presentStaffIds.length) {
+    result = await autoAssign.runDailyAutoAssign({
+      presentStaffIds,
+      ignoreWorkHours: true,
+      requireAllow: false,
+    });
+    next.morningRunAt = new Date().toISOString();
+    await SystemSetting.updateOne({ key: SETTING_KEY }, { value: next });
+  }
+
+  return {
+    data: {
+      working,
+      dateKey: next.dateKey,
+      presentCount: presentStaffIds.length,
+      autoAssignOn: autoOn,
+      canReceiveLeads: Boolean(working && autoOn),
+      assigned: result?.assigned || 0,
+      result,
+    },
+    message: working
+      ? (autoOn
+        ? `You are working today. Sheet and bucket leads will split among ${presentStaffIds.length} present staff.${result?.assigned ? ` Assigned ${result.assigned} lead(s) now.` : ''}`
+        : 'You are working today. Auto-assign is OFF — ask Owner to turn it ON to receive leads.')
+      : 'Marked not working today. You will not receive auto-assigned leads.',
+  };
+}
+
 module.exports = {
   getTodayAllow,
   getAutoAssignMaster,
   isAutoAssignOn,
   setAutoAssignMaster,
   applyWeekendAutoAssignRule,
+  isHoldAssignedOn,
+  getHoldAssignedMaster,
+  setHoldAssignedMaster,
   preview,
   allowAndAssign,
   status,
+  getMyWorkingToday,
+  setMyWorkingToday,
 };

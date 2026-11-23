@@ -1,6 +1,7 @@
 export const NAV = [
   { to: '/', label: 'Dashboard', icon: 'dashboard', permission: 'dashboard.view' },
   { to: '/all-leads', label: 'Leads', icon: 'allLeads', roles: ['OWNER', 'SUPER_ADMIN'] },
+  { to: '/passkey', label: 'Passkey', icon: 'passkey', roles: ['OWNER'] },
   { to: '/leads', label: 'Lead Management', icon: 'leads', permission: 'leads.view' },
   { to: '/pipeline', label: 'Pipeline', icon: 'pipeline', permission: 'leads.view' },
   { to: '/lead-bucket', label: 'Lead Bucket', icon: 'bucket', permission: 'leads.assign' },
@@ -11,7 +12,7 @@ export const NAV = [
   { to: '/calls', label: 'Calling Analytics', icon: 'calls', permission: 'calls.view' },
   { to: '/hourly-reports', label: 'Hourly Reports', icon: 'hourly', permission: 'hourly.view' },
   { to: '/staff', label: 'Staff Management', icon: 'staff', permission: 'staff.view' },
-  { to: '/users', label: 'User Management', icon: 'users', permission: 'roles.manage' },
+  { to: '/users', label: 'User Management', icon: 'users', roles: ['OWNER'] },
   { to: '/targets', label: 'Targets & Revenue', icon: 'targets', any: ['targets.view', 'revenue.view'] },
   { to: '/leaderboard', label: 'Leaderboard', icon: 'leaderboard', permission: 'leaderboard.view' },
   { to: '/reports', label: 'Reports & Exports', icon: 'reports', permission: 'reports.view' },
@@ -21,12 +22,4 @@ export const NAV = [
   { to: '/preset', label: 'Preset', icon: 'preset', permission: 'pipeline.manage' },
   { to: '/connection', label: 'Connection', icon: 'connection', permission: 'connections.manage' },
   { to: '/settings', label: 'Settings', icon: 'settings', permission: 'settings.manage' },
-];
-
-export const DEMOS = [
-  { role: 'OWNER', username: 'owner', password: '1234567', blurb: 'Full company access' },
-  { role: 'SUPER ADMIN', username: 'superadmin', password: '1234567', blurb: 'Operations and settings' },
-  { role: 'ADMIN', username: 'admin', password: '1234567', blurb: 'Head Office teams' },
-  { role: 'TEAM LEADER', username: 'teamleader', password: '1234567', blurb: 'Inside Sales team' },
-  { role: 'STAFF', username: 'staff', password: '1234567', blurb: 'Personal pipeline' },
 ];

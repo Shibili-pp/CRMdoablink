@@ -42,11 +42,18 @@ const LEAD_STATUSES = [
   { key: 'contacted', label: 'Contacted', category: 'open', sortOrder: 30 },
   { key: 'connected', label: 'Connected', category: 'open', sortOrder: 40 },
   { key: 'interested', label: 'Interested', category: 'open', sortOrder: 50 },
+  { key: 'interested_to_buy', label: 'Interested to Buy', category: 'positive', sortOrder: 55 },
+  { key: 'may_buy_later', label: 'May Buy Later', category: 'open', sortOrder: 56 },
+  { key: 'prospect', label: 'Prospect', category: 'positive', sortOrder: 58 },
   { key: 'positive', label: 'Positive', category: 'positive', sortOrder: 60 },
   { key: 'demo_booked', label: 'Demo Booked', category: 'positive', sortOrder: 70 },
-  { key: 'demo_completed', label: 'Demo Completed', category: 'positive', sortOrder: 80 },
+  { key: 'demo_confirmed', label: 'Demo Confirmed', category: 'positive', sortOrder: 72 },
+  { key: 'demo_rescheduled', label: 'Demo Rescheduled', category: 'positive', sortOrder: 74 },
+  { key: 'demo_completed', label: 'Demo Over', category: 'positive', sortOrder: 80 },
+  { key: 'demo_cancelled', label: 'Demo Cancelled', category: 'open', sortOrder: 82 },
   { key: 'proposal_sent', label: 'Proposal Sent', category: 'positive', sortOrder: 90 },
   { key: 'payment_pending', label: 'Payment Pending', category: 'positive', sortOrder: 100 },
+  { key: 'dp_received', label: 'DP Received', category: 'positive', sortOrder: 105 },
   { key: 'payment_received', label: 'Payment Received', category: 'won', sortOrder: 110 },
   { key: 'onboarding_pending', label: 'Onboarding Pending', category: 'won', sortOrder: 120 },
   { key: 'onboarded', label: 'Onboarded', category: 'won', sortOrder: 130 },
@@ -57,6 +64,29 @@ const LEAD_STATUSES = [
   { key: 'disqualified', label: 'Disqualified', category: 'lost', sortOrder: 160 },
   { key: 'lost', label: 'Lost', category: 'lost', sortOrder: 170 },
 ];
+
+/** Status changes that require a follow-up date/time before saving. */
+const FOLLOWUP_GATE_STATUSES = [
+  'positive',
+  'prospect',
+  'follow_up_required',
+  'may_buy_later',
+  'dp_received',
+  'interested_to_buy',
+];
+
+/** Demo statuses that require an upcoming demo date/time (Follow-ups → Upcoming demos). */
+const DEMO_GATE_STATUSES = [
+  'demo_booked',
+  'demo_confirmed',
+  'demo_rescheduled',
+];
+
+/** Demo Over — requires next follow-up date; pending demo moves to Completed demos. */
+const DEMO_OVER_STATUSES = ['demo_completed'];
+
+/** Demo Cancelled — requires cancel reason + next follow-up date. */
+const DEMO_CANCEL_STATUSES = ['demo_cancelled'];
 
 const PIPELINE_STAGES = [
   { key: 'new', label: 'New', probability: 10, sortOrder: 10, isWon: false, isLost: false },
@@ -90,9 +120,12 @@ const TARGET_TYPES = [
 ];
 
 const WON_STATUSES = ['payment_received', 'onboarding_pending', 'onboarded'];
-const POSITIVE_STATUSES = ['positive', 'demo_booked', 'demo_completed', 'proposal_sent', 'payment_pending', 'payment_received', 'onboarding_pending', 'onboarded'];
-const CONNECTED_LEAD_STATUSES = ['connected', 'interested', 'positive', 'demo_booked', 'demo_completed', 'proposal_sent', 'payment_pending', 'payment_received', 'onboarding_pending', 'onboarded', 'follow_up_required'];
+const POSITIVE_STATUSES = ['positive', 'prospect', 'interested_to_buy', 'demo_booked', 'demo_confirmed', 'demo_rescheduled', 'demo_completed', 'proposal_sent', 'payment_pending', 'dp_received', 'payment_received', 'onboarding_pending', 'onboarded'];
+const CONNECTED_LEAD_STATUSES = ['connected', 'interested', 'interested_to_buy', 'may_buy_later', 'prospect', 'positive', 'demo_booked', 'demo_confirmed', 'demo_rescheduled', 'demo_completed', 'demo_cancelled', 'proposal_sent', 'payment_pending', 'dp_received', 'payment_received', 'onboarding_pending', 'onboarded', 'follow_up_required'];
 const LOST_STATUSES = ['not_interested', 'disqualified', 'lost'];
+
+/** These statuses park the lead in the bucket (removed from Lead Management). */
+const BUCKET_PARK_STATUSES = ['disqualified', 'not_interested'];
 
 const ALERT_RULES = [
   { key: 'fresh_uncontacted', label: 'Fresh lead not contacted', threshold: 30, unit: 'minutes', enabled: true },
@@ -145,7 +178,7 @@ const HEADER_ALIASES = {
   email: ['email', 'email address', 'mail'],
   company: ['company', 'business', 'business name', 'company name', 'organisation', 'organization'],
   consultancyName: ['consultancy name', 'consultancy', 'consultant name', 'consultancyname'],
-  district: ['district'],
+  district: ['district', 'location', 'place', 'area'],
   city: ['city', 'town'],
   state: ['state', 'province'],
   country: ['country'],
@@ -202,6 +235,10 @@ module.exports = {
   LEAD_SOURCES,
   ORIGINAL_LEAD_SOURCES,
   LEAD_STATUSES,
+  FOLLOWUP_GATE_STATUSES,
+  DEMO_GATE_STATUSES,
+  DEMO_OVER_STATUSES,
+  DEMO_CANCEL_STATUSES,
   PIPELINE_STAGES,
   PRIORITIES,
   QUALITIES,
@@ -210,6 +247,7 @@ module.exports = {
   POSITIVE_STATUSES,
   CONNECTED_LEAD_STATUSES,
   LOST_STATUSES,
+  BUCKET_PARK_STATUSES,
   ALERT_RULES,
   LEADERBOARD_WEIGHTS,
   IMPORT_FIELDS,

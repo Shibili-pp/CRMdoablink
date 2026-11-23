@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Phone } from 'lucide-react';
 import api, { downloadFile } from '../api/client';
-import { DataTable, FirmBadge, PriorityBadge, Page, StatusBadge, LEAD_STATUS_COLORS, day } from '../components/ui';
+import { DataTable, Field, FirmBadge, Modal, PriorityBadge, Page, StatusBadge, LEAD_STATUS_COLORS, day } from '../components/ui';
 import { messageFrom, useApp } from '../context/AppContext';
 
 function roleLabel(roles, key) {
@@ -30,6 +30,11 @@ export default function AllLeadsPage() {
   const [facets, setFacets] = useState(null);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState([]);
+  const [selectAllMatching, setSelectAllMatching] = useState(false);
+  const [selectingAll, setSelectingAll] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [passkey, setPasskey] = useState('');
+  const [deleting, setDeleting] = useState(false);
   const [sources, setSources] = useState([]);
   const [statuses, setStatuses] = useState([]);
   const [leadRoles, setLeadRoles] = useState([]);
@@ -73,32 +78,81 @@ export default function AllLeadsPage() {
   }, []);
 
   useEffect(() => { load(); }, [queryParams.toString(), canOpen]);
-  useEffect(() => { setSelected([]); }, [filters.q, filters.status, filters.source, filters.priority, filters.leadRole, filters.firm, filters.staff, filters.bucket, filters.fromSheet, filters.assignedFrom, filters.assignedTo, filters.page]);
+  useEffect(() => {
+    setSelected([]);
+    setSelectAllMatching(false);
+  }, [filters.q, filters.status, filters.source, filters.priority, filters.leadRole, filters.firm, filters.staff, filters.bucket, filters.fromSheet, filters.assignedFrom, filters.assignedTo]);
 
   const visibleIds = rows.map((row) => row._id || row.id).filter(Boolean);
-  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.includes(id));
-  const toggleSelected = (id) => setSelected((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
-  const selectAllVisible = () => {
-    if (!visibleIds.length) return;
-    if (allVisibleSelected) {
-      setSelected((current) => current.filter((id) => !visibleIds.includes(id)));
-      return;
-    }
-    setSelected((current) => [...new Set([...current, ...visibleIds])]);
+  const allMatchingSelected = selectAllMatching && selected.length > 0;
+  const toggleSelected = (id) => {
+    setSelectAllMatching(false);
+    setSelected((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
   };
 
-  const deleteSelected = async () => {
-    if (!canDelete || !selected.length) return;
-    const count = selected.length;
-    if (!window.confirm(`Delete ${count} selected lead${count === 1 ? '' : 's'}? This removes them from the lead book.`)) return;
-    try {
-      const response = await api.post('/api/v1/leads/bulk/delete', { leadIds: selected });
-      const deleted = response.data.data?.deleted || 0;
-      toast(response.data.message || (deleted ? `Deleted ${deleted} lead${deleted === 1 ? '' : 's'}` : 'No leads were deleted'));
+  const selectAllMatchingLeads = async () => {
+    if (allMatchingSelected) {
       setSelected([]);
+      setSelectAllMatching(false);
+      return;
+    }
+    setSelectingAll(true);
+    try {
+      const params = new URLSearchParams(queryParams);
+      params.delete('page');
+      params.delete('limit');
+      params.delete('sort');
+      params.delete('order');
+      const response = await api.get(`/api/v1/leads-all/ids?${params}`);
+      const ids = response.data.data?.ids || [];
+      setSelected(ids);
+      setSelectAllMatching(ids.length > 0);
+      if (!ids.length) toast('No leads match these filters', 'error');
+      else toast(`Selected ${ids.length} lead${ids.length === 1 ? '' : 's'}`);
+    } catch (error) {
+      toast(messageFrom(error), 'error');
+    } finally {
+      setSelectingAll(false);
+    }
+  };
+
+  const askDelete = () => {
+    if (!canDelete || !selected.length) return;
+    setPasskey('');
+    setDeleteOpen(true);
+  };
+
+  const confirmDelete = async (event) => {
+    event.preventDefault();
+    if (!canDelete || !selected.length) return;
+    const code = String(passkey || '').trim();
+    if (!/^\d{6}$/.test(code)) {
+      toast('Enter the 6-digit passkey from Owner', 'error');
+      return;
+    }
+    setDeleting(true);
+    try {
+      let deleted = 0;
+      const chunkSize = 500;
+      for (let index = 0; index < selected.length; index += chunkSize) {
+        const chunk = selected.slice(index, index + chunkSize);
+        const response = await api.post('/api/v1/leads/bulk/delete', {
+          leadIds: chunk,
+          protect: true,
+          passkey: code,
+        });
+        deleted += response.data.data?.deleted || 0;
+      }
+      toast(deleted ? `Deleted ${deleted} lead${deleted === 1 ? '' : 's'}` : 'No leads were deleted');
+      setSelected([]);
+      setSelectAllMatching(false);
+      setDeleteOpen(false);
+      setPasskey('');
       load();
     } catch (error) {
       toast(messageFrom(error), 'error');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -285,15 +339,20 @@ export default function AllLeadsPage() {
       </div>
 
       <div className="reassign-bar">
-        <button className="btn secondary" type="button" onClick={selectAllVisible} disabled={!visibleIds.length}>
-          {allVisibleSelected ? 'Unselect all' : 'Select all'}
+        <button className="btn secondary" type="button" onClick={selectAllMatchingLeads} disabled={selectingAll || !(meta.total || facets?.total)}>
+          {selectingAll ? 'Selecting…' : (allMatchingSelected ? 'Unselect all' : 'Select all')}
         </button>
-        {selected.length > 0 && <span>{selected.length} selected</span>}
+        {selected.length > 0 && (
+          <span>
+            {selected.length} selected
+            {selectAllMatching ? ' · all matching filters' : ''}
+          </span>
+        )}
         {canDelete && selected.length > 0 && (
-          <button className="btn danger" type="button" onClick={deleteSelected}>Delete</button>
+          <button className="btn danger" type="button" onClick={askDelete}>Delete</button>
         )}
         {selected.length > 0 && (
-          <button className="btn secondary" type="button" onClick={() => setSelected([])}>Clear</button>
+          <button className="btn secondary" type="button" onClick={() => { setSelected([]); setSelectAllMatching(false); }}>Clear</button>
         )}
       </div>
 
@@ -343,6 +402,37 @@ export default function AllLeadsPage() {
           ]}
         />
       </section>
+
+      {deleteOpen && (
+        <Modal title="Enter delete passkey" onClose={() => { if (!deleting) { setDeleteOpen(false); setPasskey(''); } }}>
+          <p className="muted">
+            Deleting {selected.length} lead{selected.length === 1 ? '' : 's'} from All Leads requires the Owner’s 6-digit passkey.
+          </p>
+          <form onSubmit={confirmDelete}>
+            <Field label="Passkey">
+              <input
+                aria-label="Delete passkey"
+                inputMode="numeric"
+                pattern="\d{6}"
+                maxLength={6}
+                placeholder="6 digits"
+                value={passkey}
+                onChange={(event) => setPasskey(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                autoFocus
+                required
+              />
+            </Field>
+            <div className="actions" style={{ marginTop: 12 }}>
+              <button className="btn danger" type="submit" disabled={deleting || passkey.length !== 6}>
+                {deleting ? 'Deleting…' : 'Delete leads'}
+              </button>
+              <button className="btn secondary" type="button" disabled={deleting} onClick={() => { setDeleteOpen(false); setPasskey(''); }}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </Page>
   );
 }

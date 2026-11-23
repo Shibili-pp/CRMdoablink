@@ -6,14 +6,17 @@ const DAILY_CALL_TARGET = Number(DAILY_ASSIGN_SHARES.dailyTarget)
   || Number(BDA_WORKING_TARGET?.metrics?.find((row) => row.key === 'dialAttempts')?.daily)
   || 120;
 
+/** Still with staff for dialing until hold ends → bucket. Same set as Calls Today. */
+const CALLS_TODAY_HOLD_STATUSES = ['fresh', 'not_contacted', 'rnp', 'utc'];
+
 /**
  * Auto-assign ceiling per staff for the day (manual may exceed 120).
  *
- * Example: target 120, sheet today 20, carry-over fresh 30
- * → remaining 70 for RNP / UTC / bulk shuffle only.
+ * Example: target 120, hold leads on Calls Today 40, sheet today 20
+ * → remaining 60 from bucket (RNP / UTC / bulk mix).
  *
- * carryFresh = assigned fresh with assignmentDate before today
- * (today’s sheet leads are counted via sheetToday, not again here)
+ * holdCarry = assigned fresh / not_contacted / RNP / UTC that are NOT today’s sheet assigns
+ * (sheet today is counted separately so we don’t double-count)
  */
 async function todaySheetAssignCounts(staffIds, timeZone, now = new Date()) {
   const map = new Map((staffIds || []).map((id) => [String(id), 0]));
@@ -39,14 +42,18 @@ async function carryFreshCounts(staffIds, timeZone, now = new Date()) {
   const map = new Map((staffIds || []).map((id) => [String(id), 0]));
   if (!staffIds?.length) return map;
   const key = dateKeyFromDate(now, timeZone);
-  const { start } = dayBounds(key, timeZone);
+  const { start, end } = dayBounds(key, timeZone);
   const rows = await Lead.aggregate([
     {
       $match: {
         deletedAt: null,
-        status: 'fresh',
+        status: { $in: CALLS_TODAY_HOLD_STATUSES },
         assignedTo: { $in: staffIds },
-        assignmentDate: { $ne: null, $lt: start },
+        // Exclude today’s sheet assigns — those are counted via sheetToday.
+        $nor: [{
+          fromSheet: true,
+          assignmentDate: { $gte: start, $lt: end },
+        }],
       },
     },
     { $group: { _id: '$assignedTo', count: { $sum: 1 } } },
@@ -82,6 +89,7 @@ async function autoCapacityByStaff(staffIds, timeZone, now = new Date()) {
 
 module.exports = {
   DAILY_CALL_TARGET,
+  CALLS_TODAY_HOLD_STATUSES,
   todaySheetAssignCounts,
   carryFreshCounts,
   remainingAutoSlots,
